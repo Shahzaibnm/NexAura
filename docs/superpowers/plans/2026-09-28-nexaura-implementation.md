@@ -1978,6 +1978,29 @@ describe("NexauraStaking — withdrawal", function () {
     );
   });
 
+  it("resets the daily withdrawal counter on UTC day rollover, not just accumulates", async function () {
+    const { alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    // Accrue $20 claimable up front (16 days: 100 * 1.25% * 16 = 20), well within the order's
+    // 17-day accrual window, so both withdrawals below can draw from it without needing to
+    // claim again in between.
+    await ethers.provider.send("evm_increaseTime", [16 * 24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+    await staking.connect(alice).claimDailyReward();
+
+    await staking.connect(alice).withdraw(ethers.parseEther("10"));
+    expect(await staking.withdrawnToday(alice.address)).to.equal(ethers.parseEther("10"));
+
+    // Next day: withdraw the remaining $10 claimable. This would succeed even without a reset
+    // (10+10 is far under the $3000 cap either way) — what this proves is that withdrawnToday's
+    // VALUE resets to reflect only the new day's withdrawal, not that it merely stays under cap.
+    await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+    await staking.connect(alice).withdraw(ethers.parseEther("10"));
+    expect(await staking.withdrawnToday(alice.address)).to.equal(ethers.parseEther("10")); // reset, not 20
+  });
+
   it("reverts when requesting more than the claimable non-working balance", async function () {
     const { alice, staking } = await claimableFixture();
     // growthGains = 1.25 after one day; nothing else claimable without 2 directs.
@@ -2082,7 +2105,7 @@ Add this function at the end of the contract:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npx hardhat test test/NexauraStaking.test.js`
-Expected: PASS (30 passing)
+Expected: PASS (33 passing)
 
 - [ ] **Step 5: Commit**
 
