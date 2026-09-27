@@ -245,7 +245,7 @@ contract NexauraToken is Ownable, ReentrancyGuard {
         _burn(msg.sender, tokenAmount);
         require(internalReserve >= usdPaid, "Insufficient reserve");
         internalReserve -= usdPaid;
-        usdToken.transfer(forAddress, usdPaid);
+        require(usdToken.transfer(forAddress, usdPaid), "USDT transfer failed");
     }
 
     /// @dev Pays `usdAmount` of USDT straight out of internalReserve to `forAddress`, with no
@@ -259,6 +259,6 @@ contract NexauraToken is Ownable, ReentrancyGuard {
         require(usdAmount > 0, "Amount must be greater than 0");
         require(internalReserve >= usdAmount, "Insufficient reserve");
         internalReserve -= usdAmount;
-        usdToken.transfer(forAddress, usdAmount);
+        require(usdToken.transfer(forAddress, usdAmount), "USDT transfer failed");
     }
 }
