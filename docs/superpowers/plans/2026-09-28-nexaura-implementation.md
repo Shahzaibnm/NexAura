@@ -1414,6 +1414,43 @@ describe("NexauraStaking — rank and CTO tiers", function () {
     const bonus = await staking.bonusInfos(leader.address);
     expect(bonus.ctoGains).to.be.gt(0n);
   });
+
+  it("pays ALL qualifying tiers to a single ancestor, not just the highest one", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const leader = signers[9];
+    const staker = signers[10];
+
+    await staking.connect(leader).regUser(owner.address);
+    await usdt.mint(leader.address, ethers.parseEther("1000"));
+    await usdt.connect(leader).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    await staking.connect(leader).makeStake(ethers.parseEther("1000"));
+
+    await staking.connect(staker).regUser(leader.address);
+    await usdt.mint(staker.address, ethers.parseEther("1000"));
+    await usdt.connect(staker).approve(await staking.getAddress(), ethers.parseEther("1000"));
+
+    // Push leader's directBusiness (all volume here is direct, since every staker below is
+    // leader's own direct) to $40,000 — clears tier 3's $20,000 direct / $40,000 team
+    // thresholds, which numerically also clears tier 1 and tier 2. leader should collect all
+    // three: 2% + 1% + 1% = 4% of every later mintedAmount that reaches this point.
+    const directs = signers.slice(11, 19); // 8 signers
+    for (const s of directs) {
+      await staking.connect(s).regUser(leader.address);
+      await usdt.mint(s.address, ethers.parseEther("5000"));
+      await usdt.connect(s).approve(await staking.getAddress(), ethers.parseEther("5000"));
+      for (let i = 0; i < 5; i++) {
+        await staking.connect(s).makeStake(ethers.parseEther("1000"));
+      }
+    }
+
+    const before = await staking.bonusInfos(leader.address);
+    await staking.connect(staker).makeStake(ethers.parseEther("100"));
+    const after = await staking.bonusInfos(leader.address);
+
+    // mintedAmount for a $100 stake = 90 tokens (1:1 rate); 4% of 90 = 3.6.
+    expect(after.ctoGains - before.ctoGains).to.equal(ethers.parseEther("3.6"));
+  });
 });
 ```
 
@@ -1517,17 +1554,25 @@ Add CTO payout logic. Add this function and call it from `makeStake`:
 
         while (current != address(0) && filledCount < 3 && depth < 150) {
             UserInfo storage u = userInfos[current];
+            uint256 combined = u.directBusiness + u.totalTeamBusiness;
+            // Same combined-volume reasoning as _updateRank's matchBusiness: teamBusiness is
+            // meant to gate on the ancestor's whole downline, not only the depth->=2 slice.
+            //
+            // No `break` here: the spec ("pay CTO Bonus% ... to each qualifying tier found,
+            // first match up the chain PER TIER") means each of the 3 tiers is its own
+            // independent search up the chain — a single highly-qualified ancestor who clears
+            // all three thresholds is the "first match" for all three simultaneously and
+            // collects all three slices (2%+1%+1%=4%), not just the highest one. An earlier
+            // draft `break`d after the first tier match per ancestor, which shortchanged
+            // top-qualified leaders down to a single tier's bonus.
             for (uint256 t = 3; t > 0; t--) {
                 CtoTier storage tier = ctoTiers[t - 1];
-                // Same combined-volume reasoning as _updateRank's matchBusiness: teamBusiness is
-                // meant to gate on the ancestor's whole downline, not only the depth->=2 slice.
-                if (!filled[t - 1] && u.directBusiness >= tier.directBusiness && (u.directBusiness + u.totalTeamBusiness) >= tier.teamBusiness) {
+                if (!filled[t - 1] && u.directBusiness >= tier.directBusiness && combined >= tier.teamBusiness) {
                     uint256 amt = (mintedAmount * tier.bonusBp) / BP_DENOM;
                     bonusInfos[current].ctoGains += amt;
                     emit IncomeCredited(staker, current, t, amt, 4);
                     filled[t - 1] = true;
                     filledCount++;
-                    break;
                 }
             }
             current = u.referral;
@@ -1550,7 +1595,7 @@ already sees fresh totals; CTO would otherwise lag one stake behind on the exact
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npx hardhat test test/NexauraStaking.test.js`
-Expected: PASS (17 passing)
+Expected: PASS (18 passing)
 
 - [ ] **Step 5: Commit**
 
