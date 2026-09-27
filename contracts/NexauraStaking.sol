@@ -124,6 +124,22 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         bool isComplete;
     }
 
+    struct RankTier {
+        uint256 selfStake;
+        uint256 directs;
+        uint256 matchBusiness;
+        uint256 incentiveBp;
+    }
+
+    struct CtoTier {
+        uint256 directBusiness;
+        uint256 teamBusiness;
+        uint256 bonusBp;
+    }
+
+    RankTier[8] public rankTiers;
+    CtoTier[3] public ctoTiers;
+
     struct BonusInfo {
         uint256 referralGains;
         uint256 levelGains;
@@ -154,6 +170,19 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
 
         userInfos[_owner].joined = true;
         userInfos[_owner].lastStake = MAX_PACKAGE;
+
+        rankTiers[0] = RankTier(50 * BASE, 3, 2500 * BASE, 400);
+        rankTiers[1] = RankTier(100 * BASE, 6, 5000 * BASE, 600);
+        rankTiers[2] = RankTier(200 * BASE, 9, 7500 * BASE, 800);
+        rankTiers[3] = RankTier(300 * BASE, 12, 10000 * BASE, 1000);
+        rankTiers[4] = RankTier(500 * BASE, 15, 25000 * BASE, 1200);
+        rankTiers[5] = RankTier(700 * BASE, 18, 50000 * BASE, 1400);
+        rankTiers[6] = RankTier(900 * BASE, 21, 100000 * BASE, 1500);
+        rankTiers[7] = RankTier(1200 * BASE, 25, 200000 * BASE, 2000);
+
+        ctoTiers[0] = CtoTier(5000 * BASE, 10000 * BASE, 200);
+        ctoTiers[1] = CtoTier(10000 * BASE, 20000 * BASE, 100);
+        ctoTiers[2] = CtoTier(20000 * BASE, 40000 * BASE, 100);
     }
 
     function setTokenAddress(address _token) external onlyOwner nonReentrant {
@@ -233,6 +262,7 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
 
         _distributeCascade(msg.sender, mintedAmount, usdAmount);
         _updateBusinessToUpline(userInfos[msg.sender].referral, usdAmount);
+        _payCtoBonus(msg.sender, mintedAmount);
 
         emit Staked(allStake, msg.sender, usdAmount, mintedAmount, block.timestamp);
 
@@ -277,8 +307,61 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
             } else {
                 userInfos[current].totalTeamBusiness += amount;
             }
+            _updateRank(current);
             counter++;
             current = userInfos[current].referral;
+        }
+    }
+
+    event RankUpdated(address indexed user, uint256 newRank);
+
+    function _updateRank(address user) internal {
+        UserInfo storage u = userInfos[user];
+        // Combined downline volume, not totalTeamBusiness alone: _updateBusinessToUpline only
+        // credits totalTeamBusiness from depth >= 2 (grandchildren and below), so a leader whose
+        // volume comes entirely from first-level directs would never clear any matchBusiness gate
+        // if only totalTeamBusiness were checked.
+        uint256 matchBusiness = u.directBusiness + u.totalTeamBusiness;
+
+        for (uint256 i = 8; i > 0; i--) {
+            RankTier storage tier = rankTiers[i - 1];
+            if (
+                u.lastStake >= tier.selfStake &&
+                u.directs.length >= tier.directs &&
+                matchBusiness >= tier.matchBusiness
+            ) {
+                if (uint8(i) > u.rank) {
+                    u.rank = uint8(i);
+                    emit RankUpdated(user, i);
+                }
+                return;
+            }
+        }
+    }
+
+    function _payCtoBonus(address staker, uint256 mintedAmount) internal {
+        address current = userInfos[staker].referral;
+        bool[3] memory filled;
+        uint256 filledCount;
+        uint256 depth;
+
+        while (current != address(0) && filledCount < 3 && depth < 150) {
+            UserInfo storage u = userInfos[current];
+            for (uint256 t = 3; t > 0; t--) {
+                CtoTier storage tier = ctoTiers[t - 1];
+                // Same combined-volume reasoning as _updateRank's matchBusiness: teamBusiness is
+                // meant to gate on the ancestor's whole downline, not only the depth->=2 slice.
+                if (!filled[t - 1] && u.directBusiness >= tier.directBusiness && (u.directBusiness + u.totalTeamBusiness) >= tier.teamBusiness) {
+                    uint256 amt = (mintedAmount * tier.bonusBp) / BP_DENOM;
+                    bonusInfos[current].ctoGains += amt;
+                    emit IncomeCredited(staker, current, t, amt, 4);
+                    filled[t - 1] = true;
+                    filledCount++;
+                    break;
+                }
+            }
+            current = u.referral;
+            depth++;
         }
     }
 }

@@ -199,3 +199,57 @@ describe("NexauraStaking — referral cascade", function () {
     expect(ownerBonus.levelGains).to.be.gt(0n);
   });
 });
+
+describe("NexauraStaking — rank and CTO tiers", function () {
+  it("promotes a user to Starter rank once thresholds are met and never downgrades", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const directs = signers.slice(6, 9); // 3 directs, meets Starter's "Direct: 3"
+
+    for (const d of directs) {
+      await staking.connect(d).regUser(owner.address);
+      await usdt.mint(d.address, ethers.parseEther("1000"));
+      await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("1000"));
+      await staking.connect(d).makeStake(ethers.parseEther("1000")); // pushes owner's directBusiness up
+    }
+    // Owner's own selfStake gate (>= $50) is already satisfied: the constructor seeds the owner's
+    // lastStake at MAX_PACKAGE ($1000) so it behaves as a fully-qualified root referral (Task 5).
+    // A further owner.makeStake() here would revert ("Package must not decrease") since $50 < $1000.
+
+    const info = await staking.userInfos(owner.address);
+    expect(info.rank).to.equal(1); // 1 = Starter (index 0 stored as rank 1, 0 means unranked)
+  });
+
+  it("pays CTO bonus to the first qualifying upline tier", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const leader = signers[9];
+    const staker = signers[10];
+
+    await staking.connect(leader).regUser(owner.address);
+    await usdt.mint(leader.address, ethers.parseEther("20000"));
+    await usdt.connect(leader).approve(await staking.getAddress(), ethers.parseEther("20000"));
+    await staking.connect(leader).makeStake(ethers.parseEther("1000"));
+
+    await staking.connect(staker).regUser(leader.address);
+    await usdt.mint(staker.address, ethers.parseEther("20000"));
+    await usdt.connect(staker).approve(await staking.getAddress(), ethers.parseEther("20000"));
+
+    // Push leader's directBusiness past the 1st CTO tier ($5,000 direct / $10,000 team, where "team"
+    // gates on combined direct+team volume — see _updateRank/_payCtoBonus) by having several other
+    // directs stake $1000 twice each (5 signers * 2 stakes * $1000 = $10,000).
+    for (let i = 11; i <= 15; i++) {
+      const s = signers[i];
+      await staking.connect(s).regUser(leader.address);
+      await usdt.mint(s.address, ethers.parseEther("2000"));
+      await usdt.connect(s).approve(await staking.getAddress(), ethers.parseEther("2000"));
+      await staking.connect(s).makeStake(ethers.parseEther("1000"));
+      await staking.connect(s).makeStake(ethers.parseEther("1000"));
+    }
+
+    await staking.connect(staker).makeStake(ethers.parseEther("100"));
+
+    const bonus = await staking.bonusInfos(leader.address);
+    expect(bonus.ctoGains).to.be.gt(0n);
+  });
+});
