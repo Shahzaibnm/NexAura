@@ -2586,11 +2586,13 @@ describe("NEXAURA — end-to-end integration", function () {
     await staking.connect(alice).claimDailyReward();
     expect(await staking.claimableNonWorking(alice.address)).to.equal(ethers.parseEther("1.25"));
 
-    // 5. Alice withdraws her daily reward.
+    // 5. Alice withdraws $10 — her non-working claimable alone (1.25) is below MIN_WITHDRAW
+    // ($10), so this draws 1.25 from non-working and the remaining 8.75 from her working
+    // balance (referral + level income from bob/carol/dave's stakes, well above 8.75).
     const beforeAlice = await usdt.balanceOf(alice.address);
-    await staking.connect(alice).withdraw(ethers.parseEther("1.25"));
+    await staking.connect(alice).withdraw(ethers.parseEther("10"));
     const afterAlice = await usdt.balanceOf(alice.address);
-    expect(afterAlice - beforeAlice).to.equal(ethers.parseEther("1.125")); // net of 10% fee
+    expect(afterAlice - beforeAlice).to.equal(ethers.parseEther("9")); // net of 10% fee
 
     // 6. Recycling: alice's package must hold steady or grow.
     await ethers.provider.send("evm_increaseTime", [11 * 24 * 60 * 60]); // past 10-day maturity
