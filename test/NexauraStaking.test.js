@@ -357,14 +357,71 @@ describe("NexauraStaking — daily reward and caps", function () {
   it("claimableNonWorking is capped at 2x lastStake", async function () {
     const { alice, staking } = await stakedFixture();
     await staking.connect(alice).makeStake(ethers.parseEther("10")); // small stake, easy to hit the 2x cap
+    let orderId = 1;
 
-    for (let i = 0; i < 200; i++) {
-      await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
+    // Reaching the 2x cap needs 160 days of accrued growth (2 / 0.0125 daily rate) — but since
+    // Task 8, an order only accrues for 17 days (10-day maturity + 7-day grace) before
+    // claimDailyReward starts reverting unless recycled. Recycle every 16 days (past the
+    // 10-day maturity, still inside the 17-day window) to keep claiming across the full span
+    // needed to hit the cap: 10 cycles * 16 days * 1.25%/day * $10 = $20.
+    for (let cycle = 0; cycle < 10; cycle++) {
+      await ethers.provider.send("evm_increaseTime", [16 * 24 * 60 * 60]);
       await ethers.provider.send("evm_mine");
       await staking.connect(alice).claimDailyReward();
+      await staking.connect(alice).makeUnstake(orderId);
+      await staking.connect(alice).makeStake(ethers.parseEther("10"));
+      orderId++;
     }
 
     const claimable = await staking.claimableNonWorking(alice.address);
     expect(claimable).to.equal(ethers.parseEther("20")); // 2x of $10, fully accrued and capped
+  });
+});
+
+describe("NexauraStaking — maturity, grace, and recycling", function () {
+  it("an order is not yet mature before 10 days", async function () {
+    const { alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+    expect(await staking.isOrderAccruing(1)).to.equal(true);
+  });
+
+  it("an order stops accruing after maturity (10d) + grace (7d) if not recycled", async function () {
+    const { alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    await ethers.provider.send("evm_increaseTime", [18 * 24 * 60 * 60]); // past 17 days
+    await ethers.provider.send("evm_mine");
+
+    expect(await staking.isOrderAccruing(1)).to.equal(false);
+  });
+
+  it("claimDailyReward reverts once the sole order has lapsed past grace", async function () {
+    const { alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    await ethers.provider.send("evm_increaseTime", [18 * 24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+
+    await expect(staking.connect(alice).claimDailyReward()).to.be.revertedWith("no active stake");
+  });
+
+  it("makeUnstake marks the order complete and blocks a second unstake of the same order", async function () {
+    const { alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    await ethers.provider.send("evm_increaseTime", [11 * 24 * 60 * 60]); // past 10-day maturity
+    await ethers.provider.send("evm_mine");
+
+    await staking.connect(alice).makeUnstake(1);
+    const order = await staking.stakeInfos(1);
+    expect(order.isComplete).to.equal(true);
+
+    await expect(staking.connect(alice).makeUnstake(1)).to.be.revertedWith("Order not active");
+  });
+
+  it("makeUnstake reverts before maturity", async function () {
+    const { alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+    await expect(staking.connect(alice).makeUnstake(1)).to.be.revertedWith("Order not mature");
   });
 });

@@ -104,6 +104,11 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
     uint256 public constant MIN_DIRECTS_FOR_WORKING = 2;
     uint256 public constant ONE_DAY = 1 days;
 
+    uint256 public constant MATURITY_PERIOD = 10 days;
+    uint256 public constant GRACE_PERIOD = 7 days;
+
+    event Unstaked(address indexed user, uint256 orderId);
+
     event DailyRewardClaimed(address indexed user, uint256 daysElapsed, uint256 growthAmount, uint256 rankAmount);
 
     event Staked(uint256 orderId, address indexed user, uint256 packageAmount, uint256 mintedAmount, uint256 timestamp);
@@ -379,7 +384,7 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
     function claimDailyReward() external nonReentrant {
         require(userInfos[msg.sender].joined, "caller not registered");
         UserInfo storage u = userInfos[msg.sender];
-        require(u.harvestTime > 0, "no active stake");
+        require(u.harvestTime > 0 && _hasActiveOrder(msg.sender), "no active stake");
 
         uint256 daysElapsed = (block.timestamp - u.harvestTime) / ONE_DAY;
         require(daysElapsed >= 1, "Too soon");
@@ -425,5 +430,29 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         uint256 capped = b.growthGains > cap ? cap : b.growthGains;
 
         return capped > b.nonWorkingWithdrawn ? capped - b.nonWorkingWithdrawn : 0;
+    }
+
+    function isOrderAccruing(uint256 orderId) public view returns (bool) {
+        Order storage o = stakeInfos[orderId];
+        if (o.orderTime == 0 || o.isComplete) return false;
+        return block.timestamp < o.orderTime + MATURITY_PERIOD + GRACE_PERIOD;
+    }
+
+    function _hasActiveOrder(address user) internal view returns (bool) {
+        uint256[] storage orders = userInfos[user].stakeOrders;
+        for (uint256 i = orders.length; i > 0; i--) {
+            if (isOrderAccruing(orders[i - 1])) return true;
+        }
+        return false;
+    }
+
+    function makeUnstake(uint256 orderId) external nonReentrant {
+        Order storage o = stakeInfos[orderId];
+        require(o.ownerAddress == msg.sender, "Not your order");
+        require(!o.isComplete, "Order not active");
+        require(block.timestamp >= o.orderTime + MATURITY_PERIOD, "Order not mature");
+
+        o.isComplete = true;
+        emit Unstaked(msg.sender, orderId);
     }
 }
