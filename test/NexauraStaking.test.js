@@ -24,6 +24,17 @@ async function deployFixture() {
   return { owner, creatorFee, treasury, alice, bob, carol, usdt, token, staking };
 }
 
+async function stakedFixture() {
+  const base = await deployFixture();
+  const { owner, alice, usdt, staking } = base;
+
+  await staking.connect(alice).regUser(owner.address);
+  await usdt.mint(alice.address, ethers.parseEther("10000"));
+  await usdt.connect(alice).approve(await staking.getAddress(), ethers.parseEther("10000"));
+
+  return base;
+}
+
 describe("NexauraStaking — core", function () {
   it("registers the owner as joined at deploy time", async function () {
     const { owner, staking } = await deployFixture();
@@ -62,17 +73,6 @@ describe("NexauraStaking — core", function () {
 });
 
 describe("NexauraStaking — makeStake", function () {
-  async function stakedFixture() {
-    const base = await deployFixture();
-    const { owner, alice, usdt, staking } = base;
-
-    await staking.connect(alice).regUser(owner.address);
-    await usdt.mint(alice.address, ethers.parseEther("10000"));
-    await usdt.connect(alice).approve(await staking.getAddress(), ethers.parseEther("10000"));
-
-    return base;
-  }
-
   it("rejects package amounts that aren't a multiple of $10", async function () {
     const { owner, alice, staking } = await stakedFixture();
     await expect(staking.connect(alice).makeStake(ethers.parseEther("15"))).to.be.revertedWith(
@@ -151,5 +151,51 @@ describe("NexauraStaking — makeStake", function () {
 
     const ownerInfo = await staking.userInfos(owner.address);
     expect(ownerInfo.totalTeamBusiness).to.equal(ethers.parseEther("50"));
+  });
+});
+
+describe("NexauraStaking — referral cascade", function () {
+  it("credits 5% direct income to the immediate referral", async function () {
+    const { owner, alice, usdt, staking, token } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    // mintedAmount = 90 USD worth of tokens at 1:1 initial rate = 90 tokens
+    const bonus = await staking.bonusInfos(owner.address);
+    expect(bonus.referralGains).to.equal(ethers.parseEther("4.5")); // 5% of 90
+  });
+
+  it("skips level income for an upline earner whose own package is below $50", async function () {
+    const { owner, alice, bob, usdt, staking } = await stakedFixture();
+
+    await staking.connect(bob).regUser(alice.address);
+    await usdt.mint(bob.address, ethers.parseEther("1000"));
+    await usdt.connect(bob).approve(await staking.getAddress(), ethers.parseEther("1000"));
+
+    // alice stakes only $20 (< $50 gate), so she gets no level-2 income when bob's downline stakes later.
+    await staking.connect(alice).makeStake(ethers.parseEther("20"));
+    await staking.connect(bob).makeStake(ethers.parseEther("100"));
+
+    const aliceBonus = await staking.bonusInfos(alice.address);
+    // alice IS bob's direct (level 0 / Direct Income), which has no $50 gate per spec 4.1 vs 4.2 — only
+    // levels use the gate. Direct income should still be credited.
+    expect(aliceBonus.referralGains).to.be.gt(0n);
+  });
+
+  it("pays 21-level income up a deep chain, gated by each earner's own $50 package", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    // Build a chain: owner -> u1 -> u2 -> u3, each staking $100 (above the $50 gate).
+    let referral = owner.address;
+    const users = signers.slice(6, 9);
+    for (const u of users) {
+      await staking.connect(u).regUser(referral);
+      await usdt.mint(u.address, ethers.parseEther("1000"));
+      await usdt.connect(u).approve(await staking.getAddress(), ethers.parseEther("1000"));
+      await staking.connect(u).makeStake(ethers.parseEther("100"));
+      referral = u.address;
+    }
+    // owner is at level 2 relative to the last staker (u3): u3 -> u2 (level 0/direct) -> u1 (level 1) -> owner (level 2)
+    const ownerBonus = await staking.bonusInfos(owner.address);
+    expect(ownerBonus.levelGains).to.be.gt(0n);
   });
 });

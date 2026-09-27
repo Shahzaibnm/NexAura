@@ -95,7 +95,12 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
     uint256 public constant DAO_FEE_BP = 500;     // 5%
     uint256 public DAO_Amount;
 
+    uint256 public constant DIRECT_INCOME_BP = 500; // 5%
+    uint256 public constant MIN_PACKAGE_FOR_LEVEL_INCOME = 50 * BASE;
+
     event Staked(uint256 orderId, address indexed user, uint256 packageAmount, uint256 mintedAmount, uint256 timestamp);
+    event IncomeCredited(address indexed from, address indexed to, uint256 level, uint256 amount, uint8 incomeType);
+    // incomeType: 1 = Direct, 2 = Level, 3 = Rank/TeamGrowth, 4 = CTO
 
     struct UserInfo {
         address referral;
@@ -148,7 +153,7 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         treasuryAddress = _treasuryAddress;
 
         userInfos[_owner].joined = true;
-        userInfos[_owner].lastStake = MIN_PACKAGE;
+        userInfos[_owner].lastStake = MAX_PACKAGE;
     }
 
     function setTokenAddress(address _token) external onlyOwner nonReentrant {
@@ -226,11 +231,41 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
 
         userInfos[msg.sender].lastStake = usdAmount;
 
+        _distributeCascade(msg.sender, mintedAmount, usdAmount);
         _updateBusinessToUpline(userInfos[msg.sender].referral, usdAmount);
 
         emit Staked(allStake, msg.sender, usdAmount, mintedAmount, block.timestamp);
 
         return true;
+    }
+
+    function levelIncomeBp() public pure returns (uint16[21] memory bp) {
+        bp = [
+            500, 300, 150, 150, 100, 100, 50, 50, 50, 25, 25, 25, 15, 15, 15, 15, 15, 25, 25, 50, 100
+        ];
+    }
+
+    function _distributeCascade(address staker, uint256 mintedAmount, uint256 packageAmount) internal {
+        address upline = userInfos[staker].referral;
+        uint16[21] memory bp = levelIncomeBp();
+
+        for (uint256 i; i < 21 && upline != address(0); i++) {
+            if (i == 0) {
+                uint256 basis = mintedAmount;
+                uint256 uplineStake = userInfos[upline].lastStake;
+                if (packageAmount > uplineStake) {
+                    basis = (mintedAmount * uplineStake) / packageAmount;
+                }
+                uint256 amt = (basis * DIRECT_INCOME_BP) / BP_DENOM;
+                bonusInfos[upline].referralGains += amt;
+                emit IncomeCredited(staker, upline, 1, amt, 1);
+            } else if (userInfos[upline].lastStake >= MIN_PACKAGE_FOR_LEVEL_INCOME) {
+                uint256 amt = (mintedAmount * bp[i]) / BP_DENOM;
+                bonusInfos[upline].levelGains += amt;
+                emit IncomeCredited(staker, upline, i + 1, amt, 2);
+            }
+            upline = userInfos[upline].referral;
+        }
     }
 
     function _updateBusinessToUpline(address user, uint256 amount) internal {
