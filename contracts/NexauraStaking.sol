@@ -390,7 +390,12 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         uint256 rankAmount;
         if (u.rank > 0) {
             RankTier storage tier = rankTiers[u.rank - 1];
-            uint256 dailyMatchYield = (u.totalTeamBusiness * DAILY_REWARD_BP) / BP_DENOM;
+            // Same combined-volume convention as _updateRank's matchBusiness and
+            // _payCtoBonus's team-business check (Task 6): totalTeamBusiness alone excludes
+            // depth-1 (direct) volume, so it undercounts the same business figure that
+            // qualified this user for their rank in the first place.
+            uint256 combinedBusiness = u.directBusiness + u.totalTeamBusiness;
+            uint256 dailyMatchYield = (combinedBusiness * DAILY_REWARD_BP) / BP_DENOM;
             rankAmount = (dailyMatchYield * tier.incentiveBp * daysElapsed) / BP_DENOM;
             bonusInfos[msg.sender].teamGrowthGains += rankAmount;
         }

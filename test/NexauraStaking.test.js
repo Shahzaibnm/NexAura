@@ -317,6 +317,35 @@ describe("NexauraStaking — daily reward and caps", function () {
     expect(bonus.growthGains).to.equal(ethers.parseEther("1.25")); // 1.25% of 100
   });
 
+  it("uses combined direct+team business for rank-based daily accrual, not totalTeamBusiness alone", async function () {
+    const { alice, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const directs = signers.slice(6, 9); // 3 signers
+
+    // alice stakes $50 herself (sets her own harvestTime, satisfies Starter's selfStake >= 50).
+    await staking.connect(alice).makeStake(ethers.parseEther("50"));
+
+    // 3 directs stake $1000 each, all landing in alice's directBusiness (flat tree, no
+    // grandchildren) -> alice.directBusiness = 3000, alice.totalTeamBusiness = 0,
+    // alice.directs.length = 3 -> Starter rank (400bp incentive).
+    for (const d of directs) {
+      await staking.connect(d).regUser(alice.address);
+      await usdt.mint(d.address, ethers.parseEther("1000"));
+      await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("1000"));
+      await staking.connect(d).makeStake(ethers.parseEther("1000"));
+    }
+
+    await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+    await staking.connect(alice).claimDailyReward();
+
+    const bonus = await staking.bonusInfos(alice.address);
+    // dailyMatchYield = combinedBusiness(3000) * 1.25% = 37.5; rankAmount = 37.5 * 4% = 1.5.
+    // Under the totalTeamBusiness-alone bug, combinedBusiness would read as 0 (all volume here
+    // is direct-level) and this would be 0 instead.
+    expect(bonus.teamGrowthGains).to.equal(ethers.parseEther("1.5"));
+  });
+
   it("claimableWorking returns 0 for a user with fewer than 2 direct referrals", async function () {
     const { owner, alice, staking } = await stakedFixture();
     await staking.connect(alice).makeStake(ethers.parseEther("100"));
