@@ -2574,11 +2574,13 @@ describe("NEXAURA — end-to-end integration", function () {
     expect(aliceBonus.referralGains).to.equal(ethers.parseEther("9")); // (90*5%)*2
 
     // Level income: alice also earns level-2 income from dave's stake (through bob).
-    expect(aliceBonus.levelGains).to.be.gt(0n);
+    // bp[1]=300 (3%) of dave's 90-token mint = 2.7.
+    expect(aliceBonus.levelGains).to.equal(ethers.parseEther("2.7"));
 
-    // 3. Working income is claimable for alice now (2+ directs).
+    // 3. Working income is claimable for alice now (2+ directs): referralGains(9) +
+    // levelGains(2.7) = 11.7, well under her 3x cap (lastStake 100 * 3 = 300).
     const claimable = await staking.claimableWorking(alice.address);
-    expect(claimable).to.be.gt(0n);
+    expect(claimable).to.equal(ethers.parseEther("11.7"));
 
     // 4. Daily reward accrues and is claimable as non-working income.
     await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
