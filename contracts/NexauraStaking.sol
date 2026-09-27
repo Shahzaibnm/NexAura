@@ -217,8 +217,10 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
 
         if (isFirstStake) {
             address ref = userInfos[msg.sender].referral;
-            userInfos[ref].directs.push(msg.sender);
-            userInfos[ref].directJoinTimes.push(block.timestamp);
+            if (ref != address(0)) {
+                userInfos[ref].directs.push(msg.sender);
+                userInfos[ref].directJoinTimes.push(block.timestamp);
+            }
             userInfos[msg.sender].harvestTime = block.timestamp;
         }
 

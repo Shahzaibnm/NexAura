@@ -109,6 +109,18 @@ describe("NexauraStaking — makeStake", function () {
     expect(order.isComplete).to.equal(false);
   });
 
+  it("forwards the 90% mint portion to the token contract BEFORE calling pricedBuy, so internalReserve stays fully backed", async function () {
+    const { alice, staking, usdt, token } = await stakedFixture();
+
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    // Regression test for a previously-broken ordering: if pricedBuy were ever called before
+    // forwarding the real USDT, internalReserve would be credited without backing funds ever
+    // arriving, and this assertion would fail (real balance would be 0, internalReserve 90).
+    expect(await usdt.balanceOf(await token.getAddress())).to.equal(ethers.parseEther("90"));
+    expect(await token.internalReserve()).to.equal(ethers.parseEther("90"));
+  });
+
   it("rejects a recycle package smaller than the previous one", async function () {
     const { alice, staking } = await stakedFixture();
     await staking.connect(alice).makeStake(ethers.parseEther("100"));
