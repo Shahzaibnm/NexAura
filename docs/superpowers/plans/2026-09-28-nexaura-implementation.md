@@ -1015,7 +1015,7 @@ describe("NexauraStaking — makeStake", function () {
   });
 
   it("pulls USDT, splits 5% creator / 5% DAO / 90% mint, and creates an order", async function () {
-    const { alice, creatorFee, staking, usdt } = await stakedFixture();
+    const { alice, creatorFee, staking, usdt, token } = await stakedFixture();
 
     const beforeCreator = await usdt.balanceOf(creatorFee.address);
     await staking.connect(alice).makeStake(ethers.parseEther("100"));
@@ -1031,6 +1031,18 @@ describe("NexauraStaking — makeStake", function () {
     expect(order.ownerAddress).to.equal(alice.address);
     expect(order.orderValue).to.equal(ethers.parseEther("100"));
     expect(order.isComplete).to.equal(false);
+  });
+
+  it("forwards the 90% mint portion to the token contract BEFORE calling pricedBuy, so internalReserve stays fully backed", async function () {
+    const { alice, staking, usdt, token } = await stakedFixture();
+
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    // Regression test for a previously-broken ordering: if pricedBuy were ever called before
+    // forwarding the real USDT, internalReserve would be credited without backing funds ever
+    // arriving, and this assertion would fail (real balance would be 0, internalReserve 90).
+    expect(await usdt.balanceOf(await token.getAddress())).to.equal(ethers.parseEther("90"));
+    expect(await token.internalReserve()).to.equal(ethers.parseEther("90"));
   });
 
   it("rejects a recycle package smaller than the previous one", async function () {
@@ -1122,8 +1134,10 @@ Add this function at the end of the contract, just before the final closing `}`:
 
         if (isFirstStake) {
             address ref = userInfos[msg.sender].referral;
-            userInfos[ref].directs.push(msg.sender);
-            userInfos[ref].directJoinTimes.push(block.timestamp);
+            if (ref != address(0)) {
+                userInfos[ref].directs.push(msg.sender);
+                userInfos[ref].directJoinTimes.push(block.timestamp);
+            }
             userInfos[msg.sender].harvestTime = block.timestamp;
         }
 
@@ -1172,7 +1186,7 @@ and delete the now-unused `require(usdToken.approve(...) || true, ...)` line ent
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npx hardhat test test/NexauraStaking.test.js`
-Expected: PASS (11 passing)
+Expected: PASS (12 passing)
 
 - [ ] **Step 5: Commit**
 
