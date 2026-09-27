@@ -14,7 +14,7 @@
 
 - All USD-denominated values (package amounts, thresholds, gains) are stored `BASE`-scaled (`1e18`), matching the token's 18 decimals and BEP20 USDT's 18 decimals — no raw whole-dollar integers anywhere in contract state, per the spec's live-pricing model.
 - No hardcoded addresses anywhere — USDT, fee receivers, treasury are constructor/owner-set params only (spec Section 2, Section 5).
-- `NexauraToken` mint (`pricedBuy`/`mintReward`) and sell (`pricedSell`) are reachable **only** by the address set via `setStakingContract` — never by a plain EOA (spec: "tokens can only be obtained through the Staking Program").
+- `NexauraToken` mint (`pricedBuy`), sell (`pricedSell`), and reserve payout (`payoutReserve`) are reachable **only** by the address set via `setStakingContract` — never by a plain EOA (spec: "tokens can only be obtained through the Staking Program").
 - Transfer burn is exactly 1% on every `transfer`/`transferFrom` (spec Section 2). Withdrawal burns 100% of the sold token amount and applies a 10% USDT-side fee (5% creator / 5% daily spot bonus pool) — **not** a 15% LP/reserve split; that language was superseded (spec Section 2, resolved).
 - Referral/level/rank/DAO/CTO percentages are all computed against the **90%-minted token amount** of each package, not the full package value (spec Section 4, confirmed with stakeholder) — this diverges from the reference contract's use of the *full* package amount; do not copy that part of the reference.
 - Working Income (Direct + Level + Rank/Team Growth + CTO) caps at 3x active package value and requires 2+ direct referrals to be *claimable* (gains still accrue below that threshold). Non-Working Income (base Daily Reward) caps at 2x. Both caps and gains are compared in the same `BASE`-scaled numeraire (token gains vs. USD package value), same convention the reference contract uses — this assumes near-1:1 pricing and is flagged in Review Focus below, not silently ignored.
@@ -39,7 +39,7 @@ fixes, folded into the task code above:
 - **Reentrancy.** The reference contracts use OpenZeppelin's `ReentrancyGuard` on every
   state-changing external function; this plan had dropped it. Added a `ReentrancyGuard` to both
   contracts and `nonReentrant` on every function that moves funds or mutates ledgers:
-  `pricedBuy`/`pricedSell`/`mintReward` (Task 2), `regUser`/`makeStake`/`claimDailyReward`/
+  `pricedBuy`/`pricedSell`/`payoutReserve` (Task 2), `regUser`/`makeStake`/`claimDailyReward`/
   `makeUnstake`/`withdraw`/`distributeDAO`/`distributeSpotBonus` (Tasks 3–10).
 - **Price-inflation ("donation") attack — real, fixed.** The original `rateInUSDT()` priced
   tokens off `usdToken.balanceOf(address(this))`. Anyone can call `USDT.transfer` to send funds
@@ -66,6 +66,18 @@ fixes, folded into the task code above:
   pagination, which is called out as a follow-up in Task 10's `ponytail:` comment rather than
   built now, since the DAO-qualified population (thresholds start at $500 direct business) is a
   much smaller, slower-growing set than the general user base.
+- **Withdrawal self-dilution — real, fixed.** An earlier draft of Task 9 paid out bonus gains by
+  minting the withdrawn amount as fresh tokens and immediately selling them via `pricedSell`.
+  Since `pricedSell` prices against the *current* `internalReserve/totalSupply` ratio, and the
+  mint runs first, the sale is priced against a totalSupply the mint itself just inflated —
+  shortchanging the withdrawing user (verified numerically: a withdrawal equal to 10% of total
+  supply paid out ~9% instead of the correct 10%, i.e. underpaid by roughly `amount/(supply +
+  amount)`). Not an attacker-exploitable vector (it only shortchanges the withdrawer themself,
+  and totalSupply nets back to its prior value once the same tokens are burned), but a real
+  correctness bug. **Fixed**: Task 2 now exposes `payoutReserve(usdAmount, forAddress)`, which
+  pays USDT straight out of `internalReserve` with no mint or burn on either side, and Task 9's
+  `withdraw()` computes `usdValue` from `rateInUSDT()` before calling it — no self-dilution is
+  possible because supply is never touched.
 - **Sandwich/MEV pricing attack — checked, not applicable.** `pricedBuy`/`pricedSell` might look
   like a bonding curve that a large trade could move against later users. It isn't: both
   functions transact at the *current* `internalReserve/totalSupply` ratio and update both sides
@@ -142,7 +154,7 @@ test/
 
 - [ ] **Step 2: Install dependencies**
 
-Run: `cd "/home/shahzaibnm/New DIlip" && npm install`
+Run (from the project root — the directory containing this `package.json`): `npm install`
 Expected: installs without error, creates `node_modules/` and `package-lock.json`.
 
 - [ ] **Step 3: Create `hardhat.config.js`**
@@ -265,7 +277,7 @@ git commit -m "chore: scaffold Hardhat project with MockUSDT test fixture"
 
 **Interfaces:**
 - Consumes: nothing (base contract).
-- Produces: `NexauraToken` — constructor `(address owner, address usdtAddress, string memory tokenName, string memory tokenSymbol)`; `setStakingContract(address)` (owner-only); `setFeeAddresses` — **not on this contract**, fee addresses live on `NexauraStaking` (Task 3); `pricedBuy(uint256 usdAmount, address forAddress) returns (uint256 minted)` (staking-only); `pricedSell(uint256 tokenAmount, address forAddress) returns (uint256 usdPaid)` (staking-only); `mintReward(address user, uint256 amount)` (staking-only); `rateInUSDT() returns (uint256)`; standard ERC20 `transfer`/`transferFrom`/`approve`/`balanceOf`/`allowance`/`totalSupply`/`name`/`symbol`/`decimals` with 1% burn on `transfer`/`transferFrom`. Later tasks (`NexauraStaking`) call `pricedBuy`, `pricedSell`, `mintReward`, `rateInUSDT`.
+- Produces: `NexauraToken` — constructor `(address owner, address usdtAddress, string memory tokenName, string memory tokenSymbol)`; `setStakingContract(address)` (owner-only); `setFeeAddresses` — **not on this contract**, fee addresses live on `NexauraStaking` (Task 3); `pricedBuy(uint256 usdAmount, address forAddress) returns (uint256 minted)` (staking-only); `pricedSell(uint256 tokenAmount, address forAddress) returns (uint256 usdPaid)` (staking-only); `payoutReserve(uint256 usdAmount, address forAddress)` (staking-only — pure reserve payout, no mint/burn, see Task 9 for why); `rateInUSDT() returns (uint256)`; standard ERC20 `transfer`/`transferFrom`/`approve`/`balanceOf`/`allowance`/`totalSupply`/`name`/`symbol`/`decimals` with 1% burn on `transfer`/`transferFrom`. Later tasks (`NexauraStaking`) call `pricedBuy`, `pricedSell`, `payoutReserve`, `rateInUSDT`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -628,8 +640,18 @@ contract NexauraToken is Ownable, ReentrancyGuard {
         usdToken.transfer(forAddress, usdPaid);
     }
 
-    function mintReward(address user, uint256 amount) external onlyStaking nonReentrant {
-        _mint(user, amount);
+    /// @dev Pays `usdAmount` of USDT straight out of internalReserve to `forAddress`, with no
+    /// mint or burn on either side. Used for ledger-tracked bonus/gain payouts (referral, level,
+    /// rank, CTO, daily reward) that were never backed by a real minted token balance in the
+    /// first place — see Task 9. Minting those tokens and immediately burning them via
+    /// pricedSell (an earlier draft of this plan did that) would price the sale against a
+    /// mid-transaction, self-inflated totalSupply and silently shortchange the user; this avoids
+    /// that entirely by never touching supply or balances.
+    function payoutReserve(uint256 usdAmount, address forAddress) external onlyStaking nonReentrant {
+        require(usdAmount > 0, "Amount must be greater than 0");
+        require(internalReserve >= usdAmount, "Insufficient reserve");
+        internalReserve -= usdAmount;
+        usdToken.transfer(forAddress, usdAmount);
     }
 }
 ```
@@ -675,7 +697,7 @@ git commit -m "feat: add NexauraToken with 1% transfer burn, reentrancy guard, a
 - Test: `test/NexauraStaking.test.js`
 
 **Interfaces:**
-- Consumes: `NexauraToken.pricedBuy`, `.pricedSell`, `.mintReward`, `.rateInUSDT` (Task 2, called via `INexauraToken` interface — not wired into logic yet, just declared).
+- Consumes: `NexauraToken.pricedBuy`, `.pricedSell`, `.payoutReserve`, `.rateInUSDT` (Task 2, called via `INexauraToken` interface — not wired into logic yet, just declared).
 - Produces: `NexauraStaking` — constructor `(address owner, address usdtAddress, address creatorFeeAddress, address treasuryAddress)`; `setTokenAddress(address)` (owner-only); `setFeeAddresses(address, address)` (owner-only); `regUser(address referral) returns (bool)`; `userInfos(address) returns (UserInfo)` (public mapping getter); `directsOf(address) returns (address[])`. Later tasks (4+) add `makeStake`, cascade, rank/CTO, claims, unstake, withdraw, DAO, spot bonus as new functions on this same contract.
 
 - [ ] **Step 1: Write the failing tests**
@@ -762,7 +784,7 @@ interface INexauraToken {
     function rateInUSDT() external view returns (uint256);
     function pricedBuy(uint256 usdAmount, address forAddress) external returns (uint256);
     function pricedSell(uint256 tokenAmount, address forAddress) external returns (uint256);
-    function mintReward(address user, uint256 amount) external;
+    function payoutReserve(uint256 usdAmount, address forAddress) external;
 }
 
 interface IUSDLike {
@@ -1129,7 +1151,14 @@ Add this function at the end of the contract, just before the final closing `}`:
     }
 ```
 
-Note: `token.pricedBuy` mints directly using its own internal USDT accounting (the `NexauraToken` contract reads its own USDT balance for `rateInUSDT()`, but `pricedBuy` doesn't actually pull USDT itself — the staking contract already holds `mintUsd` worth of USDT from the `transferFrom` above). To keep the token's pooled-USDT accounting correct (since `rateInUSDT` divides by the token's *own* USDT balance), the staking contract must forward `mintUsd` USDT to the token contract before/with the `pricedBuy` call. Fix this by forwarding first:
+Note: `pricedBuy` doesn't pull any USDT itself — it only increments the token contract's
+`internalReserve` counter and mints tokens (see Task 2). The staking contract already holds
+`mintUsd` worth of real USDT from the `transferFrom` above, but nothing yet moves it to the
+token contract — if `pricedBuy` is called without that transfer, `internalReserve` (and
+`rateInUSDT`) would drift ahead of the token contract's real, spendable USDT balance, and a
+later `pricedSell`/`payoutReserve` would eventually fail even though the accounting says there's
+enough. Fix by forwarding the real funds first, so `internalReserve` stays backed 1:1 by actual
+USDT sitting in the token contract:
 
 Replace the `pricedBuy` call line with:
 
@@ -1162,7 +1191,7 @@ git commit -m "feat: implement makeStake with fee split and upline business prop
 
 **Interfaces:**
 - Consumes: `mintedAmount` from `makeStake` (Task 4); `userInfos[upline].lastStake` (Task 3/4).
-- Produces: internal `_distributeCascade(address staker, uint256 mintedAmount)`, called from `makeStake`; `levelIncomeBp() public pure returns (uint16[21] memory)`. Populates `bonusInfos[upline].referralGains` / `.levelGains`, read by Task 7's claim/cap logic.
+- Produces: internal `_distributeCascade(address staker, uint256 mintedAmount, uint256 packageAmount)`, called from `makeStake`; `levelIncomeBp() public pure returns (uint16[21] memory)`. Populates `bonusInfos[upline].referralGains` / `.levelGains`, read by Task 7's claim/cap logic.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1478,12 +1507,15 @@ Add CTO payout logic. Add this function and call it from `makeStake`:
     }
 ```
 
-In `makeStake`, add the CTO call right after `_distributeCascade(...)`:
+In `makeStake`, add the CTO call **after** `_updateBusinessToUpline`, not before — CTO tier
+qualification must see this stake's own contribution to `directBusiness`/`totalTeamBusiness`,
+the same as rank does (rank is recomputed inside `_updateBusinessToUpline`'s loop already, so it
+already sees fresh totals; CTO would otherwise lag one stake behind on the exact same data):
 
 ```solidity
         _distributeCascade(msg.sender, mintedAmount, usdAmount);
-        _payCtoBonus(msg.sender, mintedAmount);
         _updateBusinessToUpline(userInfos[msg.sender].referral, usdAmount);
+        _payCtoBonus(msg.sender, mintedAmount);
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1783,7 +1815,7 @@ git commit -m "feat: implement order maturity, grace period, and makeUnstake"
 - Modify: `test/NexauraStaking.test.js`
 
 **Interfaces:**
-- Consumes: `claimableWorking`/`claimableNonWorking` (Task 7); `INexauraToken.pricedSell` (Task 2); `bonusInfos[user].workingWithdrawn`/`.nonWorkingWithdrawn` (Task 7).
+- Consumes: `claimableWorking`/`claimableNonWorking` (Task 7); `INexauraToken.rateInUSDT`/`.payoutReserve` (Task 2); `bonusInfos[user].workingWithdrawn`/`.nonWorkingWithdrawn` (Task 7).
 - Produces: `withdraw(uint256 amount) external`. Task 10 (spot bonus) consumes the `dailySpotBonusPool` this task funds.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1801,8 +1833,10 @@ describe("NexauraStaking — withdrawal", function () {
     await ethers.provider.send("evm_mine");
     await staking.connect(alice).claimDailyReward();
 
-    // Fund the token contract with USDT so pricedSell can pay out.
-    await base.usdt.mint(await base.token.getAddress(), ethers.parseEther("10000"));
+    // No extra USDT funding needed: alice's $100 makeStake already grew internalReserve by 90
+    // (the 90%-mint portion), which is far more than any withdrawal amount these tests use.
+    // payoutReserve checks internalReserve, not raw balanceOf, so donating extra USDT directly
+    // to the token contract here would do nothing — see Task 2's donation-attack fix.
 
     return base;
   }
@@ -1893,11 +1927,19 @@ Add this function at the end of the contract:
         bonusInfos[msg.sender].workingWithdrawn += fromWorking;
         withdrawnToday[msg.sender] += amount;
 
-        uint256 usdValue = token.pricedSell(amount, address(this));
+        // amount is a ledger-tracked gain, never a real minted/burned token balance — priced
+        // and paid directly from the token contract's reserve via payoutReserve (Task 2), NOT
+        // pricedBuy/pricedSell, so nothing here mints or burns anything. Pricing it via a mint
+        // then an immediate pricedSell (an earlier draft of this task did that) would price the
+        // sale against a totalSupply the mint itself just inflated, shortchanging the user — see
+        // the Security Review's "Withdrawal self-dilution" entry.
+        uint256 usdValue = (amount * token.rateInUSDT()) / BASE;
 
         uint256 creatorCut = (usdValue * WITHDRAW_CREATOR_BP) / BP_DENOM;
         uint256 spotBonusCut = (usdValue * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
         uint256 netAmount = usdValue - creatorCut - spotBonusCut;
+
+        token.payoutReserve(usdValue, address(this));
 
         require(usdToken.transfer(creatorFeeAddress, creatorCut), "Creator fee transfer failed");
         dailySpotBonusPool += spotBonusCut;
@@ -1905,15 +1947,6 @@ Add this function at the end of the contract:
 
         emit Withdrawn(msg.sender, usdValue, netAmount);
     }
-```
-
-Note: `token.pricedSell` burns from `msg.sender` inside the token contract, which — since `NexauraStaking` is the caller — means it burns from `NexauraStaking`'s own token balance, not the user's tokens. Since gains were tracked purely as `bonusInfos` ledger numbers (never actually minted to the staking contract), this call will revert on insufficient balance. Fix by minting the amount to the staking contract immediately before selling it:
-
-Replace the line `uint256 usdValue = token.pricedSell(amount, address(this));` with:
-
-```solidity
-        token.mintReward(address(this), amount);
-        uint256 usdValue = token.pricedSell(amount, address(this));
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1925,7 +1958,7 @@ Expected: PASS (30 passing)
 
 ```bash
 git add contracts/NexauraStaking.sol test/NexauraStaking.test.js
-git commit -m "feat: implement withdrawal with min/max caps and 10% fee split"
+git commit -m "feat: implement withdrawal with min/max caps and 10% fee split, priced via direct reserve payout to avoid self-dilution"
 ```
 
 ---
@@ -2276,7 +2309,8 @@ describe("NEXAURA — end-to-end integration", function () {
       await usdt.mint(u.address, ethers.parseEther("5000"));
       await usdt.connect(u).approve(await staking.getAddress(), ethers.parseEther("5000"));
     }
-    await usdt.mint(await token.getAddress(), ethers.parseEther("100000")); // liquidity for sells/withdrawals
+    // No separate token-contract funding needed: each makeStake below grows internalReserve by
+    // its own 90%-mint portion, which is what payoutReserve checks against (see Task 2/Task 9).
 
     // 1. Register a 3-deep chain under the owner.
     await staking.connect(alice).regUser(owner.address);
