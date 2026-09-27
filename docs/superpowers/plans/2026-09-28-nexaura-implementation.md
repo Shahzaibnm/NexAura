@@ -923,12 +923,12 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         userInfos[_owner].lastStake = MIN_PACKAGE;
     }
 
-    function setTokenAddress(address _token) external onlyOwner {
+    function setTokenAddress(address _token) external onlyOwner nonReentrant {
         require(_token != address(0), "Invalid token address");
         token = INexauraToken(_token);
     }
 
-    function setFeeAddresses(address _creatorFeeAddress, address _treasuryAddress) external onlyOwner {
+    function setFeeAddresses(address _creatorFeeAddress, address _treasuryAddress) external onlyOwner nonReentrant {
         require(_creatorFeeAddress != address(0) && _treasuryAddress != address(0), "Invalid fee address");
         creatorFeeAddress = _creatorFeeAddress;
         treasuryAddress = _treasuryAddress;
