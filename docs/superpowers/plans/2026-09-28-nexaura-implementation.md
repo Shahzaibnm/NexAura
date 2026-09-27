@@ -1687,11 +1687,20 @@ describe("NexauraStaking — daily reward and caps", function () {
   it("claimableNonWorking is capped at 2x lastStake", async function () {
     const { alice, staking } = await stakedFixture();
     await staking.connect(alice).makeStake(ethers.parseEther("10")); // small stake, easy to hit the 2x cap
+    let orderId = 1;
 
-    for (let i = 0; i < 200; i++) {
-      await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
+    // Reaching the 2x cap needs 160 days of accrued growth (2 / 0.0125 daily rate) — but since
+    // Task 8, an order only accrues for 17 days (10-day maturity + 7-day grace) before
+    // claimDailyReward starts reverting unless recycled. Recycle every 16 days (past the
+    // 10-day maturity, still inside the 17-day window) to keep claiming across the full span
+    // needed to hit the cap: 10 cycles * 16 days * 1.25%/day * $10 = $20.
+    for (let cycle = 0; cycle < 10; cycle++) {
+      await ethers.provider.send("evm_increaseTime", [16 * 24 * 60 * 60]);
       await ethers.provider.send("evm_mine");
       await staking.connect(alice).claimDailyReward();
+      await staking.connect(alice).makeUnstake(orderId);
+      await staking.connect(alice).makeStake(ethers.parseEther("10"));
+      orderId++;
     }
 
     const claimable = await staking.claimableNonWorking(alice.address);
