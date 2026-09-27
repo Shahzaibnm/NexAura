@@ -116,6 +116,21 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
     mapping(address => uint256) public lastWithdrawDay;
     mapping(address => uint256) public withdrawnToday;
 
+    uint256 public constant DAO_QUALIFY_WINDOW = 10 days;
+    uint256 public constant DAO_DIST_INTERVAL = 7 days;
+    uint256 public constant SPOTBONUS_DIST_INTERVAL = 1 days;
+    uint256 public constant SPOTBONUS_MIN_PACKAGE = 50 * BASE;
+
+    uint256 public lastDaoDistribution;
+    uint256 public lastSpotBonusDistribution;
+    address[] public daoQualifiedUsers;
+    mapping(address => bool) public isDaoQualified;
+    address[] public spotBonusQualifiers;
+
+    event DaoShareUpdated(address indexed user, uint256 newShare);
+    event DaoDistributed(uint256 totalAmount, uint256 totalShares);
+    event SpotBonusDistributed(uint256 totalAmount, uint256 qualifiersCount);
+
     event Withdrawn(address indexed user, uint256 grossAmount, uint256 netAmount);
 
     event Unstaked(address indexed user, uint256 orderId);
@@ -207,6 +222,9 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         ctoTiers[0] = CtoTier(5000 * BASE, 10000 * BASE, 200);
         ctoTiers[1] = CtoTier(10000 * BASE, 20000 * BASE, 100);
         ctoTiers[2] = CtoTier(20000 * BASE, 40000 * BASE, 100);
+
+        lastDaoDistribution = block.timestamp;
+        lastSpotBonusDistribution = block.timestamp;
     }
 
     function setTokenAddress(address _token) external onlyOwner nonReentrant {
@@ -332,8 +350,34 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
                 userInfos[current].totalTeamBusiness += amount;
             }
             _updateRank(current);
+            _updateDaoShare(current);
             counter++;
             current = userInfos[current].referral;
+        }
+    }
+
+    function _daoShareFor(uint256 directBusiness, uint256 matchBusiness) internal pure returns (uint256) {
+        if (directBusiness >= 2500 * BASE || matchBusiness >= 4000 * BASE) return 5;
+        if (directBusiness >= 1000 * BASE || matchBusiness >= 2000 * BASE) return 2;
+        if (directBusiness >= 500 * BASE || matchBusiness >= 1000 * BASE) return 1;
+        return 0;
+    }
+
+    function _updateDaoShare(address user) internal {
+        UserInfo storage u = userInfos[user];
+        if (u.daoDeadline == 0) {
+            u.daoDeadline = block.timestamp + DAO_QUALIFY_WINDOW;
+        }
+        if (block.timestamp > u.daoDeadline) return;
+
+        uint256 newShare = _daoShareFor(u.directBusiness, u.totalTeamBusiness);
+        if (newShare > u.daoShare) {
+            if (!isDaoQualified[user]) {
+                isDaoQualified[user] = true;
+                daoQualifiedUsers.push(user);
+            }
+            u.daoShare = newShare;
+            emit DaoShareUpdated(user, newShare);
         }
     }
 
@@ -507,5 +551,82 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         require(usdToken.transfer(msg.sender, netAmount), "Withdrawal transfer failed");
 
         emit Withdrawn(msg.sender, usdValue, netAmount);
+    }
+
+    // ponytail: iterates the full daoQualifiedUsers array every call, which only ever grows
+    // (qualified users are never pruned). Fine while the DAO-qualified population is small
+    // (thresholds start at $500 direct business, so it's a curated set, not every registrant),
+    // but this will eventually need pagination (a startIndex/count-bounded variant, run across
+    // multiple owner-submitted transactions) if that population grows large enough to approach
+    // the block gas limit in one call.
+    function distributeDAO() external onlyOwner nonReentrant {
+        require(block.timestamp >= lastDaoDistribution + DAO_DIST_INTERVAL, "Too soon");
+
+        uint256 totalShares;
+        for (uint256 i; i < daoQualifiedUsers.length; i++) {
+            totalShares += userInfos[daoQualifiedUsers[i]].daoShare;
+        }
+
+        uint256 pool = DAO_Amount;
+        if (totalShares > 0 && pool > 0) {
+            for (uint256 i; i < daoQualifiedUsers.length; i++) {
+                address u = daoQualifiedUsers[i];
+                uint256 share = userInfos[u].daoShare;
+                if (share == 0) continue;
+                uint256 payout = (pool * share) / totalShares;
+                if (payout > 0) {
+                    require(usdToken.transfer(u, payout), "DAO payout transfer failed");
+                }
+            }
+        }
+
+        emit DaoDistributed(pool, totalShares);
+        DAO_Amount = 0;
+        lastDaoDistribution = block.timestamp;
+    }
+
+    function qualifiesForSpotBonus(address user) public view returns (bool) {
+        UserInfo storage u = userInfos[user];
+        uint256[] storage times = u.directJoinTimes;
+        address[] storage directs = u.directs;
+        uint256 len = times.length;
+        uint256 count;
+
+        for (uint256 i = len; i > 0 && (len - i) < 20; i--) {
+            if (block.timestamp - times[i - 1] > 1 days) break;
+            if (userInfos[directs[i - 1]].lastStake >= SPOTBONUS_MIN_PACKAGE) {
+                count++;
+                if (count >= 2) return true;
+            }
+        }
+        return false;
+    }
+
+    // ponytail: iterates only the caller-supplied candidate list, not every registered user —
+    // an off-chain indexer (or the admin) supplies today's plausible qualifiers. Upgrade path:
+    // maintain an on-chain rolling qualifiers set if the user base grows large enough that
+    // off-chain candidate curation becomes unreliable. Kept onlyOwner (see note above) so an
+    // incomplete or malicious candidate list can only come from a trusted source.
+    function distributeSpotBonus(address[] calldata candidates) external onlyOwner nonReentrant {
+        require(block.timestamp >= lastSpotBonusDistribution + SPOTBONUS_DIST_INTERVAL, "Too soon");
+
+        uint256 qualifiedCount;
+        for (uint256 i; i < candidates.length; i++) {
+            if (qualifiesForSpotBonus(candidates[i])) qualifiedCount++;
+        }
+
+        uint256 pool = dailySpotBonusPool;
+        if (qualifiedCount > 0 && pool > 0) {
+            uint256 share = pool / qualifiedCount;
+            for (uint256 i; i < candidates.length; i++) {
+                if (qualifiesForSpotBonus(candidates[i]) && share > 0) {
+                    require(usdToken.transfer(candidates[i], share), "Spot bonus transfer failed");
+                }
+            }
+        }
+
+        emit SpotBonusDistributed(pool, qualifiedCount);
+        dailySpotBonusPool = 0;
+        lastSpotBonusDistribution = block.timestamp;
     }
 }

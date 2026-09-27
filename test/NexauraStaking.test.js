@@ -512,3 +512,76 @@ describe("NexauraStaking — withdrawal", function () {
     expect(await staking.dailySpotBonusPool()).to.equal(ethers.parseEther("0.5")); // 5% of 10
   });
 });
+
+describe("NexauraStaking — DAO and spot bonus", function () {
+  it("assigns and overrides DAO share as thresholds are crossed", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const directs = signers.slice(6, 9);
+
+    for (const d of directs) {
+      await staking.connect(d).regUser(owner.address);
+      await usdt.mint(d.address, ethers.parseEther("1000"));
+      await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    }
+    // owner's directBusiness after these three $200 stakes = 600 >= 500 (Share 1 threshold)
+    await staking.connect(directs[0]).makeStake(ethers.parseEther("200"));
+    await staking.connect(directs[1]).makeStake(ethers.parseEther("200"));
+    await staking.connect(directs[2]).makeStake(ethers.parseEther("200"));
+
+    let info = await staking.userInfos(owner.address);
+    expect(info.daoShare).to.equal(1);
+
+    // Push past 1000 direct business -> Share 2
+    await staking.connect(directs[0]).makeStake(ethers.parseEther("500"));
+    info = await staking.userInfos(owner.address);
+    expect(info.daoShare).to.equal(2);
+  });
+
+  it("distributeDAO splits the pool proportionally by share, weekly", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const directs = signers.slice(6, 9);
+
+    for (const d of directs) {
+      await staking.connect(d).regUser(owner.address);
+      await usdt.mint(d.address, ethers.parseEther("1000"));
+      await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    }
+    await staking.connect(directs[0]).makeStake(ethers.parseEther("200"));
+    await staking.connect(directs[1]).makeStake(ethers.parseEther("200"));
+    await staking.connect(directs[2]).makeStake(ethers.parseEther("200"));
+
+    await ethers.provider.send("evm_increaseTime", [7 * 24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+
+    const pool = await staking.DAO_Amount();
+    const before = await usdt.balanceOf(owner.address);
+
+    await staking.distributeDAO();
+
+    const after = await usdt.balanceOf(owner.address);
+    expect(after - before).to.equal(pool); // owner is the sole qualified user, gets 100% of the pool
+    expect(await staking.DAO_Amount()).to.equal(0n);
+  });
+
+  it("distributeDAO reverts before the weekly cooldown elapses", async function () {
+    const { staking } = await stakedFixture();
+    await expect(staking.distributeDAO()).to.be.revertedWith("Too soon");
+  });
+
+  it("qualifies a user for spot bonus after 2 directs stake $50+ within 24h", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const directs = signers.slice(6, 8);
+
+    for (const d of directs) {
+      await staking.connect(d).regUser(owner.address);
+      await usdt.mint(d.address, ethers.parseEther("1000"));
+      await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("1000"));
+      await staking.connect(d).makeStake(ethers.parseEther("50"));
+    }
+
+    expect(await staking.qualifiesForSpotBonus(owner.address)).to.equal(true);
+  });
+});
