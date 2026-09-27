@@ -1625,6 +1625,12 @@ describe("NexauraStaking — daily reward and caps", function () {
   it("reverts claimDailyReward within the same 24h window", async function () {
     const { alice, staking } = await stakedFixture();
     await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    // A brand-new stake's harvestTime is "now" — the very first claim needs a full day to
+    // elapse too (you can't claim a reward for zero elapsed time), same as every later claim.
+    await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+
     await staking.connect(alice).claimDailyReward();
     await expect(staking.connect(alice).claimDailyReward()).to.be.revertedWith("Too soon");
   });
@@ -1737,7 +1743,7 @@ Add the claim function and cap views at the end of the contract:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npx hardhat test test/NexauraStaking.test.js`
-Expected: PASS (20 passing)
+Expected: PASS (22 passing)
 
 - [ ] **Step 5: Commit**
 
