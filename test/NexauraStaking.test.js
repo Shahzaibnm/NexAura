@@ -290,3 +290,52 @@ describe("NexauraStaking — rank and CTO tiers", function () {
     expect(after.ctoGains - before.ctoGains).to.equal(ethers.parseEther("3.6"));
   });
 });
+
+describe("NexauraStaking — daily reward and caps", function () {
+  it("reverts claimDailyReward within the same 24h window", async function () {
+    const { alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    // A brand-new stake's harvestTime is "now" — the very first claim needs a full day to
+    // elapse too (you can't claim a reward for zero elapsed time), same as every later claim.
+    await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+
+    await staking.connect(alice).claimDailyReward();
+    await expect(staking.connect(alice).claimDailyReward()).to.be.revertedWith("Too soon");
+  });
+
+  it("credits 1.25% of lastStake per elapsed day into growthGains", async function () {
+    const { alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+
+    await staking.connect(alice).claimDailyReward();
+    const bonus = await staking.bonusInfos(alice.address);
+    expect(bonus.growthGains).to.equal(ethers.parseEther("1.25")); // 1.25% of 100
+  });
+
+  it("claimableWorking returns 0 for a user with fewer than 2 direct referrals", async function () {
+    const { owner, alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+    // owner has 1 direct (alice) so far -> below the 2-referral gate
+    const claimable = await staking.claimableWorking(owner.address);
+    expect(claimable).to.equal(0n);
+  });
+
+  it("claimableNonWorking is capped at 2x lastStake", async function () {
+    const { alice, staking } = await stakedFixture();
+    await staking.connect(alice).makeStake(ethers.parseEther("10")); // small stake, easy to hit the 2x cap
+
+    for (let i = 0; i < 200; i++) {
+      await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
+      await ethers.provider.send("evm_mine");
+      await staking.connect(alice).claimDailyReward();
+    }
+
+    const claimable = await staking.claimableNonWorking(alice.address);
+    expect(claimable).to.equal(ethers.parseEther("20")); // 2x of $10, fully accrued and capped
+  });
+});

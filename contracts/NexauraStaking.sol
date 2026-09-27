@@ -98,6 +98,14 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
     uint256 public constant DIRECT_INCOME_BP = 500; // 5%
     uint256 public constant MIN_PACKAGE_FOR_LEVEL_INCOME = 50 * BASE;
 
+    uint256 public constant DAILY_REWARD_BP = 125; // 1.25%
+    uint256 public constant WORKING_CAP_MULT = 3;
+    uint256 public constant NONWORKING_CAP_MULT = 2;
+    uint256 public constant MIN_DIRECTS_FOR_WORKING = 2;
+    uint256 public constant ONE_DAY = 1 days;
+
+    event DailyRewardClaimed(address indexed user, uint256 daysElapsed, uint256 growthAmount, uint256 rankAmount);
+
     event Staked(uint256 orderId, address indexed user, uint256 packageAmount, uint256 mintedAmount, uint256 timestamp);
     event IncomeCredited(address indexed from, address indexed to, uint256 level, uint256 amount, uint8 incomeType);
     // incomeType: 1 = Direct, 2 = Level, 3 = Rank/TeamGrowth, 4 = CTO
@@ -366,5 +374,51 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
             current = u.referral;
             depth++;
         }
+    }
+
+    function claimDailyReward() external nonReentrant {
+        require(userInfos[msg.sender].joined, "caller not registered");
+        UserInfo storage u = userInfos[msg.sender];
+        require(u.harvestTime > 0, "no active stake");
+
+        uint256 daysElapsed = (block.timestamp - u.harvestTime) / ONE_DAY;
+        require(daysElapsed >= 1, "Too soon");
+
+        uint256 growthAmount = (u.lastStake * DAILY_REWARD_BP * daysElapsed) / BP_DENOM;
+        bonusInfos[msg.sender].growthGains += growthAmount;
+
+        uint256 rankAmount;
+        if (u.rank > 0) {
+            RankTier storage tier = rankTiers[u.rank - 1];
+            uint256 dailyMatchYield = (u.totalTeamBusiness * DAILY_REWARD_BP) / BP_DENOM;
+            rankAmount = (dailyMatchYield * tier.incentiveBp * daysElapsed) / BP_DENOM;
+            bonusInfos[msg.sender].teamGrowthGains += rankAmount;
+        }
+
+        u.harvestTime += daysElapsed * ONE_DAY;
+
+        emit DailyRewardClaimed(msg.sender, daysElapsed, growthAmount, rankAmount);
+    }
+
+    function claimableWorking(address user) public view returns (uint256) {
+        UserInfo storage u = userInfos[user];
+        if (u.directs.length < MIN_DIRECTS_FOR_WORKING) return 0;
+
+        BonusInfo storage b = bonusInfos[user];
+        uint256 total = b.referralGains + b.levelGains + b.teamGrowthGains + b.ctoGains;
+        uint256 cap = u.lastStake * WORKING_CAP_MULT;
+        uint256 capped = total > cap ? cap : total;
+
+        return capped > b.workingWithdrawn ? capped - b.workingWithdrawn : 0;
+    }
+
+    function claimableNonWorking(address user) public view returns (uint256) {
+        UserInfo storage u = userInfos[user];
+        BonusInfo storage b = bonusInfos[user];
+
+        uint256 cap = u.lastStake * NONWORKING_CAP_MULT;
+        uint256 capped = b.growthGains > cap ? cap : b.growthGains;
+
+        return capped > b.nonWorkingWithdrawn ? capped - b.nonWorkingWithdrawn : 0;
     }
 }
