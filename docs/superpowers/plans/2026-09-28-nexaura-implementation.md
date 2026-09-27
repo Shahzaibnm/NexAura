@@ -920,7 +920,13 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         treasuryAddress = _treasuryAddress;
 
         userInfos[_owner].joined = true;
-        userInfos[_owner].lastStake = MIN_PACKAGE;
+        // Seeded at MAX_PACKAGE, not MIN_PACKAGE: the owner acts as the root referral for the
+        // whole tree, and both the direct-income cap (Task 5) and the $50 level-income gate
+        // (Task 5) compare a staker's package against their UPLINE's own lastStake. Seeding the
+        // owner at $10 would spuriously cap/gate every stake made directly under the owner,
+        // since real packages routinely exceed $10 — the owner needs to look like a
+        // fully-qualified referral, not a minimum one.
+        userInfos[_owner].lastStake = MAX_PACKAGE;
     }
 
     function setTokenAddress(address _token) external onlyOwner nonReentrant {
@@ -1290,21 +1296,20 @@ Add this pure function and internal cascade function, and call the cascade from 
         uint16[21] memory bp = levelIncomeBp();
 
         for (uint256 i; i < 21 && upline != address(0); i++) {
-            if (userInfos[upline].lastStake >= MIN_PACKAGE_FOR_LEVEL_INCOME) {
-                if (i == 0) {
-                    uint256 basis = mintedAmount;
-                    uint256 uplineStake = userInfos[upline].lastStake;
-                    if (packageAmount > uplineStake) {
-                        basis = (mintedAmount * uplineStake) / packageAmount;
-                    }
-                    uint256 amt = (basis * DIRECT_INCOME_BP) / BP_DENOM;
-                    bonusInfos[upline].referralGains += amt;
-                    emit IncomeCredited(staker, upline, 1, amt, 1);
-                } else {
-                    uint256 amt = (mintedAmount * bp[i]) / BP_DENOM;
-                    bonusInfos[upline].levelGains += amt;
-                    emit IncomeCredited(staker, upline, i + 1, amt, 2);
+            if (i == 0) {
+                // Direct Income (spec 4.1) has no $50 gate — only Level Generation Income does.
+                uint256 basis = mintedAmount;
+                uint256 uplineStake = userInfos[upline].lastStake;
+                if (packageAmount > uplineStake) {
+                    basis = (mintedAmount * uplineStake) / packageAmount;
                 }
+                uint256 amt = (basis * DIRECT_INCOME_BP) / BP_DENOM;
+                bonusInfos[upline].referralGains += amt;
+                emit IncomeCredited(staker, upline, 1, amt, 1);
+            } else if (userInfos[upline].lastStake >= MIN_PACKAGE_FOR_LEVEL_INCOME) {
+                uint256 amt = (mintedAmount * bp[i]) / BP_DENOM;
+                bonusInfos[upline].levelGains += amt;
+                emit IncomeCredited(staker, upline, i + 1, amt, 2);
             }
             upline = userInfos[upline].referral;
         }
@@ -1435,7 +1440,7 @@ Add these structs and state near the other structs:
     CtoTier[3] public ctoTiers;
 ```
 
-Add tier initialization at the end of the constructor (after the existing `userInfos[_owner].lastStake = MIN_PACKAGE;` line):
+Add tier initialization at the end of the constructor (after the existing `userInfos[_owner].lastStake = MAX_PACKAGE;` line):
 
 ```solidity
         rankTiers[0] = RankTier(50 * BASE, 3, 2500 * BASE, 400);
