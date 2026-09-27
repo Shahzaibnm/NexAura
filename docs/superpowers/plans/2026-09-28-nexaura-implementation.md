@@ -2202,6 +2202,93 @@ describe("NexauraStaking — DAO and spot bonus", function () {
 
     expect(await staking.qualifiesForSpotBonus(owner.address)).to.equal(true);
   });
+
+  it("distributeDAO splits the pool proportionally by share, not equal-per-head", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const ownerDirects = signers.slice(6, 9);
+    const leader = signers[9];
+    const leaderDirects = signers.slice(10, 13);
+
+    for (const d of ownerDirects) {
+      await staking.connect(d).regUser(owner.address);
+      await usdt.mint(d.address, ethers.parseEther("1000"));
+      await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    }
+    // owner.directBusiness = 600 (3*200) -> DAO share 1
+    await staking.connect(ownerDirects[0]).makeStake(ethers.parseEther("200"));
+    await staking.connect(ownerDirects[1]).makeStake(ethers.parseEther("200"));
+    await staking.connect(ownerDirects[2]).makeStake(ethers.parseEther("200"));
+
+    await staking.connect(leader).regUser(owner.address);
+    for (const d of leaderDirects) {
+      await staking.connect(d).regUser(leader.address);
+      await usdt.mint(d.address, ethers.parseEther("1000"));
+      await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    }
+    // leader.directBusiness = 1200 (3*400) -> DAO share 2
+    await staking.connect(leaderDirects[0]).makeStake(ethers.parseEther("400"));
+    await staking.connect(leaderDirects[1]).makeStake(ethers.parseEther("400"));
+    await staking.connect(leaderDirects[2]).makeStake(ethers.parseEther("400"));
+
+    expect((await staking.userInfos(owner.address)).daoShare).to.equal(1);
+    expect((await staking.userInfos(leader.address)).daoShare).to.equal(2);
+
+    await ethers.provider.send("evm_increaseTime", [7 * 24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+
+    const beforeOwner = await usdt.balanceOf(owner.address);
+    const beforeLeader = await usdt.balanceOf(leader.address);
+
+    await staking.distributeDAO();
+
+    const ownerPayout = (await usdt.balanceOf(owner.address)) - beforeOwner;
+    const leaderPayout = (await usdt.balanceOf(leader.address)) - beforeLeader;
+
+    // pool = 5% of (600+1200) = 90; totalShares = 1+2=3 -> owner gets 90*1/3=30, leader 90*2/3=60.
+    // A bug that split equally per head instead of by share would give both 45, not 30/60.
+    expect(ownerPayout).to.equal(ethers.parseEther("30"));
+    expect(leaderPayout).to.equal(ethers.parseEther("60"));
+  });
+
+  it("distributeSpotBonus splits the pool among qualifying candidates and resets it", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const funder = signers[6];
+
+    // Fund the spot bonus pool via an unrelated user's withdrawal (5% of every withdrawal feeds it).
+    await staking.connect(funder).regUser(owner.address);
+    await usdt.mint(funder.address, ethers.parseEther("1000"));
+    await usdt.connect(funder).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    await staking.connect(funder).makeStake(ethers.parseEther("100"));
+
+    await ethers.provider.send("evm_increaseTime", [8 * 24 * 60 * 60]); // 100*1.25%*8=10 claimable
+    await ethers.provider.send("evm_mine");
+    await staking.connect(funder).claimDailyReward();
+    await staking.connect(funder).withdraw(ethers.parseEther("10"));
+
+    const pool = await staking.dailySpotBonusPool();
+    expect(pool).to.equal(ethers.parseEther("0.5")); // 5% of 10
+
+    // Freshly (relative to "now"), qualify owner: 2 directs stake $50+ within the last 24h.
+    const directs = signers.slice(7, 9);
+    for (const d of directs) {
+      await staking.connect(d).regUser(owner.address);
+      await usdt.mint(d.address, ethers.parseEther("1000"));
+      await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("1000"));
+      await staking.connect(d).makeStake(ethers.parseEther("50"));
+    }
+    expect(await staking.qualifiesForSpotBonus(owner.address)).to.equal(true);
+
+    const before = await usdt.balanceOf(owner.address);
+    await staking.distributeSpotBonus([owner.address]);
+    const after = await usdt.balanceOf(owner.address);
+
+    expect(after - before).to.equal(pool); // sole qualifying candidate gets 100% of the pool
+    expect(await staking.dailySpotBonusPool()).to.equal(0n);
+
+    await expect(staking.distributeSpotBonus([owner.address])).to.be.revertedWith("Too soon");
+  });
 });
 ```
 
@@ -2255,7 +2342,12 @@ Add DAO share update logic — a helper checking the OR-threshold table:
         }
         if (block.timestamp > u.daoDeadline) return;
 
-        uint256 newShare = _daoShareFor(u.directBusiness, u.totalTeamBusiness);
+        // Same combined-volume convention as _updateRank's matchBusiness, _payCtoBonus's
+        // team-business check, and claimDailyReward's rank accrual (Tasks 6-7): spec 4.4's
+        // "Matching Business" is the same concept as 4.3's "Match Business", so
+        // totalTeamBusiness alone would undercount it the same way it did there.
+        uint256 combinedBusiness = u.directBusiness + u.totalTeamBusiness;
+        uint256 newShare = _daoShareFor(u.directBusiness, combinedBusiness);
         if (newShare > u.daoShare) {
             if (!isDaoQualified[user]) {
                 isDaoQualified[user] = true;
@@ -2410,7 +2502,7 @@ Update the second test ("distributeDAO splits the pool...") — its sanity asser
 ```
 
 Run: `npx hardhat test test/NexauraStaking.test.js`
-Expected: PASS (34 passing)
+Expected: PASS (39 passing)
 
 - [ ] **Step 5: Commit**
 
