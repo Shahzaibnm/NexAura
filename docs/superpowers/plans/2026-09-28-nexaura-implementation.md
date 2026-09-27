@@ -1989,17 +1989,24 @@ describe("NexauraStaking — withdrawal", function () {
   it("pays out 90% to the user and splits the 10% fee 5/5 into creator fee and spot bonus pool", async function () {
     const { alice, creatorFee, staking, usdt } = await claimableFixture();
 
+    // claimableFixture only accrues $1.25 (1 day) — below the $10 minimum withdrawal. Advance 7
+    // more days and claim again to reach exactly $10 claimable (100 * 1.25% * 8 days = 10),
+    // still well within the order's 17-day accrual window.
+    await ethers.provider.send("evm_increaseTime", [7 * 24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+    await staking.connect(alice).claimDailyReward();
+
     const beforeAlice = await usdt.balanceOf(alice.address);
     const beforeCreator = await usdt.balanceOf(creatorFee.address);
 
-    await staking.connect(alice).withdraw(ethers.parseEther("1.25"));
+    await staking.connect(alice).withdraw(ethers.parseEther("10"));
 
     const afterAlice = await usdt.balanceOf(alice.address);
     const afterCreator = await usdt.balanceOf(creatorFee.address);
 
-    expect(afterAlice - beforeAlice).to.equal(ethers.parseEther("1.125")); // 90% of 1.25
-    expect(afterCreator - beforeCreator).to.equal(ethers.parseEther("0.0625")); // 5% of 1.25
-    expect(await staking.dailySpotBonusPool()).to.equal(ethers.parseEther("0.0625")); // 5% of 1.25
+    expect(afterAlice - beforeAlice).to.equal(ethers.parseEther("9")); // 90% of 10
+    expect(afterCreator - beforeCreator).to.equal(ethers.parseEther("0.5")); // 5% of 10
+    expect(await staking.dailySpotBonusPool()).to.equal(ethers.parseEther("0.5")); // 5% of 10
   });
 });
 ```
