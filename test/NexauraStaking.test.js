@@ -425,3 +425,67 @@ describe("NexauraStaking — maturity, grace, and recycling", function () {
     await expect(staking.connect(alice).makeUnstake(1)).to.be.revertedWith("Order not mature");
   });
 });
+
+describe("NexauraStaking — withdrawal", function () {
+  async function claimableFixture() {
+    const base = await stakedFixture();
+    const { alice, staking } = base;
+    await staking.connect(alice).makeStake(ethers.parseEther("100"));
+
+    await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+    await staking.connect(alice).claimDailyReward();
+
+    // No extra USDT funding needed: alice's $100 makeStake already grew internalReserve by 90
+    // (the 90%-mint portion), which is far more than any withdrawal amount these tests use.
+    // payoutReserve checks internalReserve, not raw balanceOf, so donating extra USDT directly
+    // to the token contract here would do nothing — see Task 2's donation-attack fix.
+
+    return base;
+  }
+
+  it("reverts below the $10 minimum", async function () {
+    const { alice, staking } = await claimableFixture();
+    await expect(staking.connect(alice).withdraw(ethers.parseEther("5"))).to.be.revertedWith(
+      "Below minimum withdrawal"
+    );
+  });
+
+  it("reverts above the $3000/day cap", async function () {
+    const { alice, staking } = await claimableFixture();
+    await expect(staking.connect(alice).withdraw(ethers.parseEther("3001"))).to.be.revertedWith(
+      "Exceeds daily withdrawal cap"
+    );
+  });
+
+  it("reverts when requesting more than the claimable non-working balance", async function () {
+    const { alice, staking } = await claimableFixture();
+    // growthGains = 1.25 after one day; nothing else claimable without 2 directs.
+    await expect(staking.connect(alice).withdraw(ethers.parseEther("10"))).to.be.revertedWith(
+      "Exceeds claimable balance"
+    );
+  });
+
+  it("pays out 90% to the user and splits the 10% fee 5/5 into creator fee and spot bonus pool", async function () {
+    const { alice, creatorFee, staking, usdt } = await claimableFixture();
+
+    // claimableFixture only accrues $1.25 (1 day) — below the $10 minimum withdrawal. Advance 7
+    // more days and claim again to reach exactly $10 claimable (100 * 1.25% * 8 days = 10),
+    // still well within the order's 17-day accrual window.
+    await ethers.provider.send("evm_increaseTime", [7 * 24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+    await staking.connect(alice).claimDailyReward();
+
+    const beforeAlice = await usdt.balanceOf(alice.address);
+    const beforeCreator = await usdt.balanceOf(creatorFee.address);
+
+    await staking.connect(alice).withdraw(ethers.parseEther("10"));
+
+    const afterAlice = await usdt.balanceOf(alice.address);
+    const afterCreator = await usdt.balanceOf(creatorFee.address);
+
+    expect(afterAlice - beforeAlice).to.equal(ethers.parseEther("9")); // 90% of 10
+    expect(afterCreator - beforeCreator).to.equal(ethers.parseEther("0.5")); // 5% of 10
+    expect(await staking.dailySpotBonusPool()).to.equal(ethers.parseEther("0.5")); // 5% of 10
+  });
+});

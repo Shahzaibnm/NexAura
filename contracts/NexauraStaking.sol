@@ -107,6 +107,17 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
     uint256 public constant MATURITY_PERIOD = 10 days;
     uint256 public constant GRACE_PERIOD = 7 days;
 
+    uint256 public constant MIN_WITHDRAW = 10 * BASE;
+    uint256 public constant MAX_DAILY_WITHDRAW = 3000 * BASE;
+    uint256 public constant WITHDRAW_CREATOR_BP = 500; // 5%
+    uint256 public constant WITHDRAW_SPOTBONUS_BP = 500; // 5%
+
+    uint256 public dailySpotBonusPool;
+    mapping(address => uint256) public lastWithdrawDay;
+    mapping(address => uint256) public withdrawnToday;
+
+    event Withdrawn(address indexed user, uint256 grossAmount, uint256 netAmount);
+
     event Unstaked(address indexed user, uint256 orderId);
 
     event DailyRewardClaimed(address indexed user, uint256 daysElapsed, uint256 growthAmount, uint256 rankAmount);
@@ -454,5 +465,47 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
 
         o.isComplete = true;
         emit Unstaked(msg.sender, orderId);
+    }
+
+    function withdraw(uint256 amount) external nonReentrant {
+        require(amount >= MIN_WITHDRAW, "Below minimum withdrawal");
+
+        uint256 today = block.timestamp / ONE_DAY;
+        if (lastWithdrawDay[msg.sender] != today) {
+            lastWithdrawDay[msg.sender] = today;
+            withdrawnToday[msg.sender] = 0;
+        }
+        require(withdrawnToday[msg.sender] + amount <= MAX_DAILY_WITHDRAW, "Exceeds daily withdrawal cap");
+
+        uint256 availableNonWorking = claimableNonWorking(msg.sender);
+        uint256 availableWorking = claimableWorking(msg.sender);
+        require(amount <= availableNonWorking + availableWorking, "Exceeds claimable balance");
+
+        uint256 fromNonWorking = amount > availableNonWorking ? availableNonWorking : amount;
+        uint256 fromWorking = amount - fromNonWorking;
+
+        bonusInfos[msg.sender].nonWorkingWithdrawn += fromNonWorking;
+        bonusInfos[msg.sender].workingWithdrawn += fromWorking;
+        withdrawnToday[msg.sender] += amount;
+
+        // amount is a ledger-tracked gain, never a real minted/burned token balance — priced
+        // and paid directly from the token contract's reserve via payoutReserve (Task 2), NOT
+        // pricedBuy/pricedSell, so nothing here mints or burns anything. Pricing it via a mint
+        // then an immediate pricedSell (an earlier draft of this task did that) would price the
+        // sale against a totalSupply the mint itself just inflated, shortchanging the user — see
+        // the Security Review's "Withdrawal self-dilution" entry.
+        uint256 usdValue = (amount * token.rateInUSDT()) / BASE;
+
+        uint256 creatorCut = (usdValue * WITHDRAW_CREATOR_BP) / BP_DENOM;
+        uint256 spotBonusCut = (usdValue * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
+        uint256 netAmount = usdValue - creatorCut - spotBonusCut;
+
+        token.payoutReserve(usdValue, address(this));
+
+        require(usdToken.transfer(creatorFeeAddress, creatorCut), "Creator fee transfer failed");
+        dailySpotBonusPool += spotBonusCut;
+        require(usdToken.transfer(msg.sender, netAmount), "Withdrawal transfer failed");
+
+        emit Withdrawn(msg.sender, usdValue, netAmount);
     }
 }
