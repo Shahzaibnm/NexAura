@@ -370,7 +370,12 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         }
         if (block.timestamp > u.daoDeadline) return;
 
-        uint256 newShare = _daoShareFor(u.directBusiness, u.totalTeamBusiness);
+        // Same combined-volume convention as _updateRank's matchBusiness, _payCtoBonus's
+        // team-business check, and claimDailyReward's rank accrual (Tasks 6-7): spec 4.4's
+        // "Matching Business" is the same concept as 4.3's "Match Business", so
+        // totalTeamBusiness alone would undercount it the same way it did there.
+        uint256 combinedBusiness = u.directBusiness + u.totalTeamBusiness;
+        uint256 newShare = _daoShareFor(u.directBusiness, combinedBusiness);
         if (newShare > u.daoShare) {
             if (!isDaoQualified[user]) {
                 isDaoQualified[user] = true;
