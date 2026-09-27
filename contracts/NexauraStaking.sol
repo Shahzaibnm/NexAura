@@ -347,17 +347,20 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
 
         while (current != address(0) && filledCount < 3 && depth < 150) {
             UserInfo storage u = userInfos[current];
+            // Same combined-volume reasoning as _updateRank's matchBusiness: teamBusiness is
+            // meant to gate on the ancestor's whole downline, not only the depth->=2 slice.
+            uint256 combined = u.directBusiness + u.totalTeamBusiness;
             for (uint256 t = 3; t > 0; t--) {
                 CtoTier storage tier = ctoTiers[t - 1];
-                // Same combined-volume reasoning as _updateRank's matchBusiness: teamBusiness is
-                // meant to gate on the ancestor's whole downline, not only the depth->=2 slice.
-                if (!filled[t - 1] && u.directBusiness >= tier.directBusiness && (u.directBusiness + u.totalTeamBusiness) >= tier.teamBusiness) {
+                // Each tier is searched independently up the chain (spec 4.6): a single ancestor
+                // who clears all 3 tiers' thresholds collects all 3 bonuses, not just the highest.
+                // No `break` here — that's intentional.
+                if (!filled[t - 1] && u.directBusiness >= tier.directBusiness && combined >= tier.teamBusiness) {
                     uint256 amt = (mintedAmount * tier.bonusBp) / BP_DENOM;
                     bonusInfos[current].ctoGains += amt;
                     emit IncomeCredited(staker, current, t, amt, 4);
                     filled[t - 1] = true;
                     filledCount++;
-                    break;
                 }
             }
             current = u.referral;

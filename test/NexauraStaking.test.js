@@ -252,4 +252,41 @@ describe("NexauraStaking — rank and CTO tiers", function () {
     const bonus = await staking.bonusInfos(leader.address);
     expect(bonus.ctoGains).to.be.gt(0n);
   });
+
+  it("pays ALL qualifying tiers to a single ancestor, not just the highest one", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const leader = signers[9];
+    const staker = signers[10];
+
+    await staking.connect(leader).regUser(owner.address);
+    await usdt.mint(leader.address, ethers.parseEther("1000"));
+    await usdt.connect(leader).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    await staking.connect(leader).makeStake(ethers.parseEther("1000"));
+
+    await staking.connect(staker).regUser(leader.address);
+    await usdt.mint(staker.address, ethers.parseEther("1000"));
+    await usdt.connect(staker).approve(await staking.getAddress(), ethers.parseEther("1000"));
+
+    // Push leader's directBusiness (all volume here is direct, since every staker below is
+    // leader's own direct) to $40,000 — clears tier 3's $20,000 direct / $40,000 team
+    // thresholds, which numerically also clears tier 1 and tier 2. leader should collect all
+    // three: 2% + 1% + 1% = 4% of every later mintedAmount that reaches this point.
+    const directs = signers.slice(11, 19); // 8 signers
+    for (const s of directs) {
+      await staking.connect(s).regUser(leader.address);
+      await usdt.mint(s.address, ethers.parseEther("5000"));
+      await usdt.connect(s).approve(await staking.getAddress(), ethers.parseEther("5000"));
+      for (let i = 0; i < 5; i++) {
+        await staking.connect(s).makeStake(ethers.parseEther("1000"));
+      }
+    }
+
+    const before = await staking.bonusInfos(leader.address);
+    await staking.connect(staker).makeStake(ethers.parseEther("100"));
+    const after = await staking.bonusInfos(leader.address);
+
+    // mintedAmount for a $100 stake = 90 tokens (1:1 rate); 4% of 90 = 3.6.
+    expect(after.ctoGains - before.ctoGains).to.equal(ethers.parseEther("3.6"));
+  });
 });
