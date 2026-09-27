@@ -91,6 +91,12 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
     uint256 public totalReg;
     uint256 public allStake;
 
+    uint256 public constant CREATOR_FEE_BP = 500; // 5%
+    uint256 public constant DAO_FEE_BP = 500;     // 5%
+    uint256 public DAO_Amount;
+
+    event Staked(uint256 orderId, address indexed user, uint256 packageAmount, uint256 mintedAmount, uint256 timestamp);
+
     struct UserInfo {
         address referral;
         address[] directs;
@@ -174,5 +180,68 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
 
     function directsOf(address user) external view returns (address[] memory) {
         return userInfos[user].directs;
+    }
+
+    function makeStake(uint256 usdAmount) external nonReentrant returns (bool) {
+        require(userInfos[msg.sender].joined, "caller not registered");
+        require(
+            usdAmount >= MIN_PACKAGE &&
+                usdAmount <= MAX_PACKAGE &&
+                usdAmount % PACKAGE_STEP == 0,
+            "Invalid package amount"
+        );
+        require(usdAmount >= userInfos[msg.sender].lastStake, "Package must not decrease");
+
+        bool isFirstStake = userInfos[msg.sender].stakeOrders.length == 0;
+
+        require(usdToken.transferFrom(msg.sender, address(this), usdAmount), "USDT transfer failed");
+
+        uint256 creatorCut = (usdAmount * CREATOR_FEE_BP) / BP_DENOM;
+        uint256 daoCut = (usdAmount * DAO_FEE_BP) / BP_DENOM;
+        uint256 mintUsd = usdAmount - creatorCut - daoCut;
+
+        require(usdToken.transfer(creatorFeeAddress, creatorCut), "Creator fee transfer failed");
+        DAO_Amount += daoCut;
+
+        require(usdToken.transfer(address(token), mintUsd), "Mint funding transfer failed");
+        uint256 mintedAmount = token.pricedBuy(mintUsd, msg.sender);
+
+        allStake++;
+        stakeInfos[allStake] = Order({
+            ownerAddress: msg.sender,
+            orderValue: usdAmount,
+            orderTime: block.timestamp,
+            isComplete: false
+        });
+        userInfos[msg.sender].stakeOrders.push(allStake);
+
+        if (isFirstStake) {
+            address ref = userInfos[msg.sender].referral;
+            userInfos[ref].directs.push(msg.sender);
+            userInfos[ref].directJoinTimes.push(block.timestamp);
+            userInfos[msg.sender].harvestTime = block.timestamp;
+        }
+
+        userInfos[msg.sender].lastStake = usdAmount;
+
+        _updateBusinessToUpline(userInfos[msg.sender].referral, usdAmount);
+
+        emit Staked(allStake, msg.sender, usdAmount, mintedAmount, block.timestamp);
+
+        return true;
+    }
+
+    function _updateBusinessToUpline(address user, uint256 amount) internal {
+        address current = user;
+        uint256 counter;
+        while (current != address(0)) {
+            if (counter == 0) {
+                userInfos[current].directBusiness += amount;
+            } else {
+                userInfos[current].totalTeamBusiness += amount;
+            }
+            counter++;
+            current = userInfos[current].referral;
+        }
     }
 }
