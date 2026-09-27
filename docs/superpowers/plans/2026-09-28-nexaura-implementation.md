@@ -1372,9 +1372,11 @@ describe("NexauraStaking — rank and CTO tiers", function () {
       await staking.connect(d).regUser(owner.address);
       await usdt.mint(d.address, ethers.parseEther("1000"));
       await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("1000"));
-      await staking.connect(d).makeStake(ethers.parseEther("1000")); // pushes owner's totalTeamBusiness up
+      await staking.connect(d).makeStake(ethers.parseEther("1000")); // pushes owner's directBusiness up
     }
-    await staking.connect(owner).makeStake(ethers.parseEther("50")); // owner's own package -> Self >= 50
+    // Owner's own selfStake gate (>= $50) is already satisfied: the constructor seeds the owner's
+    // lastStake at MAX_PACKAGE ($1000) so it behaves as a fully-qualified root referral (Task 5).
+    // A further owner.makeStake() here would revert ("Package must not decrease") since $50 < $1000.
 
     const info = await staking.userInfos(owner.address);
     expect(info.rank).to.equal(1); // 1 = Starter (index 0 stored as rank 1, 0 means unranked)
@@ -1395,13 +1397,15 @@ describe("NexauraStaking — rank and CTO tiers", function () {
     await usdt.mint(staker.address, ethers.parseEther("20000"));
     await usdt.connect(staker).approve(await staking.getAddress(), ethers.parseEther("20000"));
 
-    // Push leader's directBusiness/totalTeamBusiness past the 1st CTO tier ($5,000 direct / $10,000 team)
-    // by having several other directs stake first.
+    // Push leader's directBusiness past the 1st CTO tier ($5,000 direct / $10,000 team, where "team"
+    // gates on combined direct+team volume — see _updateRank/_payCtoBonus) by having several other
+    // directs stake $1000 twice each (5 signers * 2 stakes * $1000 = $10,000).
     for (let i = 11; i <= 15; i++) {
       const s = signers[i];
       await staking.connect(s).regUser(leader.address);
       await usdt.mint(s.address, ethers.parseEther("2000"));
       await usdt.connect(s).approve(await staking.getAddress(), ethers.parseEther("2000"));
+      await staking.connect(s).makeStake(ethers.parseEther("1000"));
       await staking.connect(s).makeStake(ethers.parseEther("1000"));
     }
 
@@ -1477,7 +1481,11 @@ Add rank update logic. Replace `_updateBusinessToUpline` with a version that als
 
     function _updateRank(address user) internal {
         UserInfo storage u = userInfos[user];
-        uint256 matchBusiness = u.totalTeamBusiness;
+        // Combined downline volume, not totalTeamBusiness alone: _updateBusinessToUpline only
+        // credits totalTeamBusiness from depth >= 2 (grandchildren and below), so a leader whose
+        // volume comes entirely from first-level directs would never clear any matchBusiness gate
+        // if only totalTeamBusiness were checked.
+        uint256 matchBusiness = u.directBusiness + u.totalTeamBusiness;
 
         for (uint256 i = 8; i > 0; i--) {
             RankTier storage tier = rankTiers[i - 1];
@@ -1511,7 +1519,9 @@ Add CTO payout logic. Add this function and call it from `makeStake`:
             UserInfo storage u = userInfos[current];
             for (uint256 t = 3; t > 0; t--) {
                 CtoTier storage tier = ctoTiers[t - 1];
-                if (!filled[t - 1] && u.directBusiness >= tier.directBusiness && u.totalTeamBusiness >= tier.teamBusiness) {
+                // Same combined-volume reasoning as _updateRank's matchBusiness: teamBusiness is
+                // meant to gate on the ancestor's whole downline, not only the depth->=2 slice.
+                if (!filled[t - 1] && u.directBusiness >= tier.directBusiness && (u.directBusiness + u.totalTeamBusiness) >= tier.teamBusiness) {
                     uint256 amt = (mintedAmount * tier.bonusBp) / BP_DENOM;
                     bonusInfos[current].ctoGains += amt;
                     emit IncomeCredited(staker, current, t, amt, 4);
@@ -1540,7 +1550,7 @@ already sees fresh totals; CTO would otherwise lag one stake behind on the exact
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `npx hardhat test test/NexauraStaking.test.js`
-Expected: PASS (16 passing)
+Expected: PASS (17 passing)
 
 - [ ] **Step 5: Commit**
 
