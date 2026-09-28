@@ -203,15 +203,23 @@ Business thresholds simultaneously:
 
 ### 4.4 DAO Partnership Income — 5% globally, weighted overridable shares
 
-- Qualification window: **within 10 days of joining with a package.**
-- Tier thresholds (either condition qualifies — OR, not AND):
+- Qualification window is **per-tier, not a single shared window**, each
+  clocked from the member's own `daoJoinTime` (set once, at their own first
+  stake — "joining with their package"; a member who never stakes their own
+  package never starts this clock, regardless of how much business flows to
+  them from downline activity). Tier thresholds (either condition qualifies —
+  OR, not AND) and each tier's own deadline:
 
-| Direct Business ($) | OR Matching Business ($) | Share |
-|---|---|---|
-| 500 | 1,000 | 1 |
-| 1,000 | 2,000 | 2 |
-| 2,500 | 4,000 | 5 |
+| Direct Business ($) | OR Matching Business ($) | Share | Deadline (from own join) |
+|---|---|---|---|
+| 500 | 1,000 | 1 | 10 days |
+| 1,000 | 2,000 | 2 | 20 days |
+| 2,500 | 4,000 | 5 | 30 days |
 
+- The three tiers qualify **independently**, not sequentially (confirmed):
+  missing Share 1's 10-day deadline forfeits Share 1 forever, but does not
+  block Share 2 or Share 5 if their own (longer) thresholds are cleared
+  within their own (longer) windows.
 - Shares **override**, not stack: reaching Share-2 thresholds replaces a
   Share-1 membership; reaching Share-5 replaces Share-2 (confirmed).
 - 5% of every package's 90%-mint value accumulates into a global `DAO_Amount`

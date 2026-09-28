@@ -2642,3 +2642,43 @@ git commit -m "test: add end-to-end integration scenario across the full NEXAURA
 - The 5 items in the spec's Section 6 (DAO income not capped, rank never downgrades, spot bonus equal split, CTO AND-thresholds, placeholder fee-role names) remain open items for the stakeholder — none of them are contradicted by this plan, but confirm before mainnet deployment.
 - `distributeSpotBonus` takes an explicit candidate list (see the `ponytail:` comment in Task 10) rather than scanning all registered users on-chain — this avoids unbounded gas growth as the user base scales, at the cost of needing an off-chain job (or the admin) to supply that day's plausible candidates. Revisit if the qualifying population becomes large enough that manual/off-chain curation becomes unreliable.
 - **Open architectural question, not addressed by this plan:** as built, `withdraw()` only pays out the `bonusInfos` gains ledger (referral/level/rank/CTO/daily-reward) — a user's *real* wallet token balance (from package-principal minting at `makeStake`, or received via P2P transfer) has no path back to USDT anywhere in this design; it can only be P2P-transferred further. This is faithful to the approved spec (Section 3.6 explicitly scopes withdrawal to "gains"), but the deck's "100% Sell-Burn mechanism: tokens sold through the platform..." language reads as if a general sell-your-balance action should exist too. Flagging for the stakeholder rather than building it unasked — if a general sell path is wanted, it's a small addition (a `sellBalance(uint256 tokenAmount)` wrapping `token.pricedSell` directly against the caller's own wallet balance, plus deciding whether it shares the 10%/5%/5% withdrawal fee or the deck's original 15% split).
+
+### Post-merge correction: DAO qualification windows are per-tier, not shared (2026-09-28)
+
+After the branch's final review, the stakeholder clarified the DAO Partnership table directly
+against the original deck: the DURATION column (10/20/30 days) is **not** a single flat
+qualification window shared by all three share tiers, as this plan and Task 10's implementation
+originally had it (`DAO_QUALIFY_WINDOW = 10 days` applied uniformly, with the deadline lazily
+started on the first downline business touch). The correct behavior, confirmed by the
+stakeholder:
+
+- Each tier is its own independent qualification path with its own deadline: Share 1 (500
+  direct / 1,000 matching) within 10 days, Share 2 (1,000/2,000) within 20 days, Share 5
+  (2,500/4,000) within 30 days.
+- All three deadlines are measured from the member's own `daoJoinTime` — set once, at the
+  member's own first stake ("joining with their package") — not from whenever a downline's
+  business first happens to touch them. A member who never stakes their own package never
+  starts this clock at all.
+- The tiers are independent, not sequential: missing Share 1's 10-day deadline forfeits Share 1
+  permanently, but does not block Share 2 or Share 5 if their own (longer) thresholds are
+  cleared within their own (longer) windows.
+
+This was implemented directly against `contracts/NexauraStaking.sol` (not re-run through the
+full SDD task-review loop, given the small, well-understood, directly-stakeholder-specified
+scope): replaced `UserInfo.daoDeadline` with `daoJoinTime` (set in `makeStake`'s first-stake
+block, alongside `harvestTime`), added a `DaoTier[3]` struct array (mirroring the existing
+`RankTier[8]`/`CtoTier[3]` pattern) initialized in the constructor with each tier's own
+`(directBusiness, matchingBusiness, share, duration)`, and rewrote `_updateDaoShare` to loop
+tiers highest-to-lowest, checking each tier's own window and thresholds independently rather
+than gating all tiers behind one shared deadline. Removed the now-unused `DAO_QUALIFY_WINDOW`
+constant and `_daoShareFor` helper. Three existing DAO tests needed updating (they relied on the
+old behavior where `owner`, as a referral root who never staked, could still earn DAO share
+purely from downline business — under the corrected design this no longer starts a DAO clock at
+all), and one new test was added proving the independent-tier behavior (missing Share 1's window
+doesn't block Share 2). Full suite: 49/49 passing after the fix.
+
+This also resolves the final review's Important finding #4 (DAO deadline anchored to a downline
+touch instead of the user's own stake) as a side effect, since fixing the anchor point was
+required to fix the window logic correctly.
+
+Spec updated to match: `docs/superpowers/specs/2026-09-28-nexaura-design.md` Section 4.4.

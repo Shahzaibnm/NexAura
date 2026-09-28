@@ -519,6 +519,12 @@ describe("NexauraStaking — DAO and spot bonus", function () {
     const signers = await ethers.getSigners();
     const directs = signers.slice(6, 9);
 
+    // DAO's 10/20/30-day windows are clocked from the user's OWN daoJoinTime, set only when
+    // they stake their own package -- owner must stake to start their own DAO clock.
+    await usdt.mint(owner.address, ethers.parseEther("1000"));
+    await usdt.connect(owner).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    await staking.connect(owner).makeStake(ethers.parseEther("1000"));
+
     for (const d of directs) {
       await staking.connect(d).regUser(owner.address);
       await usdt.mint(d.address, ethers.parseEther("1000"));
@@ -542,6 +548,10 @@ describe("NexauraStaking — DAO and spot bonus", function () {
     const { owner, staking, usdt } = await stakedFixture();
     const signers = await ethers.getSigners();
     const directs = signers.slice(6, 9);
+
+    await usdt.mint(owner.address, ethers.parseEther("1000"));
+    await usdt.connect(owner).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    await staking.connect(owner).makeStake(ethers.parseEther("1000")); // starts owner's DAO clock
 
     for (const d of directs) {
       await staking.connect(d).regUser(owner.address);
@@ -592,6 +602,10 @@ describe("NexauraStaking — DAO and spot bonus", function () {
     const leader = signers[9];
     const leaderDirects = signers.slice(10, 13);
 
+    await usdt.mint(owner.address, ethers.parseEther("1000"));
+    await usdt.connect(owner).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    await staking.connect(owner).makeStake(ethers.parseEther("1000")); // starts owner's DAO clock
+
     for (const d of ownerDirects) {
       await staking.connect(d).regUser(owner.address);
       await usdt.mint(d.address, ethers.parseEther("1000"));
@@ -603,6 +617,11 @@ describe("NexauraStaking — DAO and spot bonus", function () {
     await staking.connect(ownerDirects[2]).makeStake(ethers.parseEther("200"));
 
     await staking.connect(leader).regUser(owner.address);
+    await usdt.mint(leader.address, ethers.parseEther("1000"));
+    await usdt.connect(leader).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    await staking.connect(leader).makeStake(ethers.parseEther("10")); // starts leader's DAO clock
+    // (adds 10 to owner.directBusiness too: 600+10=610, still comfortably in the Share 1 band)
+
     for (const d of leaderDirects) {
       await staking.connect(d).regUser(leader.address);
       await usdt.mint(d.address, ethers.parseEther("1000"));
@@ -619,6 +638,7 @@ describe("NexauraStaking — DAO and spot bonus", function () {
     await ethers.provider.send("evm_increaseTime", [7 * 24 * 60 * 60]);
     await ethers.provider.send("evm_mine");
 
+    const pool = await staking.DAO_Amount();
     const beforeOwner = await usdt.balanceOf(owner.address);
     const beforeLeader = await usdt.balanceOf(leader.address);
 
@@ -627,10 +647,12 @@ describe("NexauraStaking — DAO and spot bonus", function () {
     const ownerPayout = (await usdt.balanceOf(owner.address)) - beforeOwner;
     const leaderPayout = (await usdt.balanceOf(leader.address)) - beforeLeader;
 
-    // pool = 5% of (600+1200) = 90; totalShares = 1+2=3 -> owner gets 90*1/3=30, leader 90*2/3=60.
-    // A bug that split equally per head instead of by share would give both 45, not 30/60.
-    expect(ownerPayout).to.equal(ethers.parseEther("30"));
-    expect(leaderPayout).to.equal(ethers.parseEther("60"));
+    // Weighted by share (owner=1, leader=2, totalShares=3), not equal-per-head (which would
+    // split the pool 50/50 regardless of share). Computed from the pool dynamically rather than
+    // hardcoded, since exactly how much volume flowed through is no longer a round number now
+    // that owner/leader's own stakes (needed to start their DAO clocks) also feed the pool.
+    expect(ownerPayout).to.equal(pool / 3n);
+    expect(leaderPayout).to.equal((pool * 2n) / 3n);
   });
 
   it("distributeSpotBonus splits the pool among qualifying candidates and resets it", async function () {
@@ -670,5 +692,38 @@ describe("NexauraStaking — DAO and spot bonus", function () {
     expect(await staking.dailySpotBonusPool()).to.equal(0n);
 
     await expect(staking.distributeSpotBonus([owner.address])).to.be.revertedWith("Too soon");
+  });
+
+  it("lets a member miss Share 1's window but still earn Share 2 within its own longer window", async function () {
+    const { owner, staking, usdt } = await stakedFixture();
+    const signers = await ethers.getSigners();
+    const directs = signers.slice(6, 9);
+
+    await usdt.mint(owner.address, ethers.parseEther("1000"));
+    await usdt.connect(owner).approve(await staking.getAddress(), ethers.parseEther("1000"));
+    await staking.connect(owner).makeStake(ethers.parseEther("1000")); // starts owner's DAO clock (day 0)
+
+    for (const d of directs) {
+      await staking.connect(d).regUser(owner.address);
+      await usdt.mint(d.address, ethers.parseEther("2000"));
+      await usdt.connect(d).approve(await staking.getAddress(), ethers.parseEther("2000"));
+    }
+
+    // Past Share 1's 10-day window, owner's directBusiness is still only $300 (below the $500
+    // Share 1 threshold) -- Share 1 is now permanently missed for this user.
+    await staking.connect(directs[0]).makeStake(ethers.parseEther("300"));
+    await ethers.provider.send("evm_increaseTime", [11 * 24 * 60 * 60]);
+    await ethers.provider.send("evm_mine");
+
+    let info = await staking.userInfos(owner.address);
+    expect(info.daoShare).to.equal(0);
+
+    // A later stake at day 11 pushes directBusiness to 300+800=1100 (Share 2's $1000
+    // threshold), still inside Share 2's own 20-day window (11 <= 20) -- qualifies for Share 2
+    // directly, even though Share 1's window already closed without ever being reached.
+    await staking.connect(directs[1]).makeStake(ethers.parseEther("800"));
+
+    info = await staking.userInfos(owner.address);
+    expect(info.daoShare).to.equal(2);
   });
 });

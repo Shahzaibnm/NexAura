@@ -116,7 +116,6 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
     mapping(address => uint256) public lastWithdrawDay;
     mapping(address => uint256) public withdrawnToday;
 
-    uint256 public constant DAO_QUALIFY_WINDOW = 10 days;
     uint256 public constant DAO_DIST_INTERVAL = 7 days;
     uint256 public constant SPOTBONUS_DIST_INTERVAL = 1 days;
     uint256 public constant SPOTBONUS_MIN_PACKAGE = 50 * BASE;
@@ -152,7 +151,7 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         uint256 harvestTime;
         uint8 rank;
         uint256 daoShare;
-        uint256 daoDeadline;
+        uint256 daoJoinTime;
         bool joined;
     }
 
@@ -176,8 +175,16 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         uint256 bonusBp;
     }
 
+    struct DaoTier {
+        uint256 directBusiness;
+        uint256 matchingBusiness;
+        uint256 share;
+        uint256 duration; // deadline for THIS tier, measured from the user's own daoJoinTime
+    }
+
     RankTier[8] public rankTiers;
     CtoTier[3] public ctoTiers;
+    DaoTier[3] public daoTiers;
 
     struct BonusInfo {
         uint256 referralGains;
@@ -222,6 +229,10 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         ctoTiers[0] = CtoTier(5000 * BASE, 10000 * BASE, 200);
         ctoTiers[1] = CtoTier(10000 * BASE, 20000 * BASE, 100);
         ctoTiers[2] = CtoTier(20000 * BASE, 40000 * BASE, 100);
+
+        daoTiers[0] = DaoTier(500 * BASE, 1000 * BASE, 1, 10 days);
+        daoTiers[1] = DaoTier(1000 * BASE, 2000 * BASE, 2, 20 days);
+        daoTiers[2] = DaoTier(2500 * BASE, 4000 * BASE, 5, 30 days);
 
         lastDaoDistribution = block.timestamp;
         lastSpotBonusDistribution = block.timestamp;
@@ -298,6 +309,7 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
                 userInfos[ref].directJoinTimes.push(block.timestamp);
             }
             userInfos[msg.sender].harvestTime = block.timestamp;
+            userInfos[msg.sender].daoJoinTime = block.timestamp;
         }
 
         userInfos[msg.sender].lastStake = usdAmount;
@@ -356,33 +368,36 @@ contract NexauraStaking is Ownable, ReentrancyGuard {
         }
     }
 
-    function _daoShareFor(uint256 directBusiness, uint256 matchBusiness) internal pure returns (uint256) {
-        if (directBusiness >= 2500 * BASE || matchBusiness >= 4000 * BASE) return 5;
-        if (directBusiness >= 1000 * BASE || matchBusiness >= 2000 * BASE) return 2;
-        if (directBusiness >= 500 * BASE || matchBusiness >= 1000 * BASE) return 1;
-        return 0;
-    }
-
+    // Each DAO tier is an independent qualification path with its OWN deadline, measured from
+    // the user's own daoJoinTime (their first-ever stake, "joining with their package") — NOT a
+    // single flat window shared by all tiers. Per the deck's table: Share 1 (500 direct / 1000
+    // matching) must be hit within 10 days of joining; Share 2 (1000/2000) within 20 days;
+    // Share 5 (2500/4000) within 30 days. Missing a tier's own deadline forfeits that tier
+    // forever, but does NOT forfeit a higher tier whose (longer) window is still open —
+    // confirmed: each row qualifies independently, not sequentially.
     function _updateDaoShare(address user) internal {
         UserInfo storage u = userInfos[user];
-        if (u.daoDeadline == 0) {
-            u.daoDeadline = block.timestamp + DAO_QUALIFY_WINDOW;
-        }
-        if (block.timestamp > u.daoDeadline) return;
+        if (u.daoJoinTime == 0) return; // hasn't staked their own package yet
 
         // Same combined-volume convention as _updateRank's matchBusiness, _payCtoBonus's
         // team-business check, and claimDailyReward's rank accrual (Tasks 6-7): spec 4.4's
         // "Matching Business" is the same concept as 4.3's "Match Business", so
         // totalTeamBusiness alone would undercount it the same way it did there.
         uint256 combinedBusiness = u.directBusiness + u.totalTeamBusiness;
-        uint256 newShare = _daoShareFor(u.directBusiness, combinedBusiness);
-        if (newShare > u.daoShare) {
-            if (!isDaoQualified[user]) {
-                isDaoQualified[user] = true;
-                daoQualifiedUsers.push(user);
+
+        for (uint256 i = 3; i > 0; i--) {
+            DaoTier storage tier = daoTiers[i - 1];
+            if (tier.share <= u.daoShare) continue; // already hold this tier or better
+            if (block.timestamp > u.daoJoinTime + tier.duration) continue; // this tier's window closed
+            if (u.directBusiness >= tier.directBusiness || combinedBusiness >= tier.matchingBusiness) {
+                if (!isDaoQualified[user]) {
+                    isDaoQualified[user] = true;
+                    daoQualifiedUsers.push(user);
+                }
+                u.daoShare = tier.share;
+                emit DaoShareUpdated(user, tier.share);
+                break; // highest still-open, still-qualifying tier found
             }
-            u.daoShare = newShare;
-            emit DaoShareUpdated(user, newShare);
         }
     }
 
