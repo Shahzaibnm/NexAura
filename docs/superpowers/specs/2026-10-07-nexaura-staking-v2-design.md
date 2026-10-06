@@ -13,7 +13,7 @@ Package $10–$1,000 in $10 steps; package must not decrease; user must be regis
 |---|---|
 | 5% | Creator fee address (USDT) |
 | 5% | DAO pool (held in staking contract, distributed later) |
-| 9% (10% of the 90%) | Token's liquidity pool address (USDT) |
+| 9% (10% of the 90%) | **Reserve pool contract** (USDT). The token pulls from it to cover a swap when its own reserve is short (existing `_coverShortfall`). |
 | 81% (90% of the 90%) | Minted as tokens at the live price, **minted to the staking contract and locked** |
 
 On $100: $5 / $5 / $9 / $81.
@@ -90,8 +90,10 @@ is written.
 
 ## Open items to settle during implementation
 
-- Whether the $9 USDT liquidity transfer is made by the staking contract directly or via the
+- Whether the $9 USDT reserve transfer is made by the staking contract directly or via the
   token.
+- Owner said both stake ($9) and sell deductions go to the reserve. Sell's 10% already does;
+  confirm whether sell's 5% "liquidity pool" part also goes to the reserve pool address.
 - Exact definition of "working" vs "non-working" user for the 3x/2x cap (keep the current
   definition unless the deck says otherwise).
 
