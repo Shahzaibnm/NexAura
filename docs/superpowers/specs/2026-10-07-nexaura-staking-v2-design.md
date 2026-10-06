@@ -29,9 +29,8 @@ On $100: $5 / $5 / $9 / $81.
 
 - Requires `block.timestamp >= startTime + 10 days` and `!claimed`. Claimable at any time
   after maturity, including after grace ends.
-- ROI = 12.5% (1.25% x 10 days) of the order's `lockedTokens`, in tokens, no price conversion
-  (e.g. 200 locked tokens -> 25 ROI tokens). ROI is fixed at 10 days: nothing accrues beyond
-  maturity.
+- ROI = 12.5% (1.25% x 10 days) of the order's `lockedTokens`, in tokens, no price conversion,
+  for any package amount. ROI is fixed at 10 days: nothing accrues beyond maturity.
 - User receives the locked principal tokens (released from the staking contract) plus the ROI
   tokens (**minted at claim**). Order marked `claimed`.
 - ROI is clamped to the claimer's remaining cap room.
@@ -49,9 +48,9 @@ On $100: $5 / $5 / $9 / $81.
 - **Inactive:** after grace, no income credits until the user stakes again. Principal and ROI
   of existing orders stay claimable.
 - **Caps, in tokens:** 2x (non-working) or 3x (working) of the user's **unclaimed** staked
-  token amount (sum of `lockedTokens` over orders not yet claimed).
-  E.g. 200 staked tokens -> cap 400 (non-working) / 600 (working). "Working" keeps the
-  existing contract's definition.
+  token amount (sum of `lockedTokens` over orders not yet claimed): cap = 2x (non-working) or
+  3x (working) of that sum, for any amount. "Working" keeps the existing contract's
+  definition.
 - **Business volume** stays tracked in USD (rank thresholds are in dollars); rank income
   converts to tokens at the live price at claim time. Every gain type counts
   towards the cap and is clamped to the room left.
