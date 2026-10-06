@@ -48,8 +48,12 @@ On $100: $5 / $5 / $9 / $81.
   level, rank, DAO, spot, CTO) still credit.
 - **Inactive:** after grace, no income credits until the user stakes again. Principal and ROI
   of existing orders stay claimable.
-- **Caps, in tokens:** 2x (non-working) or 3x (working) of the user's staked token amount.
-  E.g. 200 staked tokens -> cap 400 (non-working) / 600 (working). Every gain type counts
+- **Caps, in tokens:** 2x (non-working) or 3x (working) of the user's **unclaimed** staked
+  token amount (sum of `lockedTokens` over orders not yet claimed).
+  E.g. 200 staked tokens -> cap 400 (non-working) / 600 (working). "Working" keeps the
+  existing contract's definition.
+- **Business volume** stays tracked in USD (rank thresholds are in dollars); rank income
+  converts to tokens at the live price at claim time. Every gain type counts
   towards the cap and is clamped to the room left.
 - **Claimables:** every income other than the principal+ROI claim (direct, level, rank, DAO,
   spot, CTO) accrues as a token claimable balance; the user claims it and receives tokens.
