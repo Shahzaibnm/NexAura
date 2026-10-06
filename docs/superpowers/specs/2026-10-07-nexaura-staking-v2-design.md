@@ -29,16 +29,17 @@ On $100: $5 / $5 / $9 / $81.
 
 - Requires `block.timestamp >= startTime + 10 days` and `!claimed`. Claimable at any time
   after maturity, including after grace ends.
-- ROI = 12.5% (1.25% x 10 days) of the order's full `usdAmount`, converted to tokens at the
-  live price at claim time. ROI is fixed at 10 days: nothing accrues beyond maturity.
+- ROI = 12.5% (1.25% x 10 days) of the order's `lockedTokens`, in tokens, no price conversion
+  (e.g. 200 locked tokens -> 25 ROI tokens). ROI is fixed at 10 days: nothing accrues beyond
+  maturity.
 - User receives the locked principal tokens (released from the staking contract) plus the ROI
   tokens (**minted at claim**). Order marked `claimed`.
 - ROI is clamped to the claimer's remaining cap room.
 - After paying out, the same transaction runs:
   1. `_distributeLevelIncome(claimer, roiAmount)`: the 21-level table from the deck, each
      percentage applied to the claimed ROI. Pays active uplines, clamped to their cap room.
-  2. Rank income for the claimer: 12.5% x (direct + team business) x rank incentive %,
-     for that cycle. Replaces the daily `claimDailyReward`.
+  2. Rank income for the claimer: 12.5% x (direct + team business, in tokens) x rank
+     incentive %, for that cycle. Replaces the daily `claimDailyReward`.
 
 ## Active, grace and caps
 
@@ -47,13 +48,21 @@ On $100: $5 / $5 / $9 / $81.
   level, rank, DAO, spot, CTO) still credit.
 - **Inactive:** after grace, no income credits until the user stakes again. Principal and ROI
   of existing orders stay claimable.
-- **Caps:** 2x for non-working users, 3x for working users. Every gain type counts towards
-  the cap and is clamped to the room left.
+- **Caps, in tokens:** 2x (non-working) or 3x (working) of the user's staked token amount.
+  E.g. 200 staked tokens -> cap 400 (non-working) / 600 (working). Every gain type counts
+  towards the cap and is clamped to the room left.
+- **Claimables:** every income other than the principal+ROI claim (direct, level, rank, DAO,
+  spot, CTO) accrues as a token claimable balance; the user claims it and receives tokens.
+
+## Removed from the staking contract
+
+No `makeUnstake`, no token selling, no sell/burn logic here. Users claim tokens from this
+contract, then swap in the token contract at its price.
 
 ## Unchanged from current contract
 
 DAO distribution, spot bonus, CTO, per-type claim functions, withdrawal minimum/daily cap and
-fee rules, token sell burn (15% deduction, 100% burn). Each income credit is gated on the
+fee rules (the 15% sell deduction and 100% burn live in the token contract's swap). Each income credit is gated on the
 recipient being active (or in grace).
 
 ## Token contract change
