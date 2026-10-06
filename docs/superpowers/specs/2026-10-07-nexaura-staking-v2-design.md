@@ -42,7 +42,8 @@ On $100: $5 / $5 / $9 / $81.
 
 ## Active, grace and caps
 
-- **Active:** the user has an order younger than 10 days.
+- **Active:** the user's last (newest) stake is under 10 days old. Only the last stake is
+  checked.
 - **Grace:** 7 days after the user's newest order matures; all other income types (direct,
   level, rank, DAO, spot, CTO) still credit.
 - **Inactive:** after grace, no income credits until the user stakes again. Principal and ROI
