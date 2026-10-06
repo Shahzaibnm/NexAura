@@ -740,13 +740,13 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         return _capOf(user);
     }
 
-    // Tokens claimable right now across all types: min(totalGains, cap) - claimed.
+    // Tokens claimable right now across all types: totalGains - claimed. The cap is enforced
+    // when income is credited (_clampToCapRoom), so earned income stays claimable even after
+    // claiming an order shrinks the cap.
     function claimable(address user) public view returns (uint256) {
         uint256 total = _totalGains(user);
-        uint256 cap = _capOf(user);
-        uint256 capped = total > cap ? cap : total;
         uint256 claimed = _totalClaimed(user);
-        return capped > claimed ? capped - claimed : 0;
+        return total > claimed ? total - claimed : 0;
     }
 
     function _claimableOfType(

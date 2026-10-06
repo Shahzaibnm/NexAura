@@ -226,15 +226,22 @@ describe("NexauraStakingV2 — full behaviour", function () {
       await expect(s2.connect(u2[0]).claimReferralGains()).to.be.revertedWith("Below minimum withdrawal");
     });
 
-    it("claiming the last order drops the cap, which strands earned-but-unclaimed income (current behaviour)", async function () {
-      const { owner, u, staking } = await deploy();
-      const [alice, bob] = u;
+    it("earned income stays claimable after claiming the last order shrinks the cap, but new income stops", async function () {
+      const { owner, u, token, staking } = await deploy();
+      const [alice, bob, carol] = u;
       await join(staking, alice, owner, 100);
       await join(staking, bob, alice, 1000); // alice direct income 50 tokens, unclaimed
       await pass(10 * DAY + 60);
       await staking.connect(alice).claimOrder(1);
-      expect(await staking.claimable(alice.address)).to.equal(0n);
-      await expect(staking.connect(alice).claimReferralGains()).to.be.revertedWith("Nothing to claim");
+      expect(await staking.capOf(alice.address)).to.equal(0n);
+
+      expect(await staking.claimableReferralGains(alice.address)).to.equal(e(50));
+      await staking.connect(alice).claimReferralGains();
+      expect(await token.balanceOf(alice.address)).to.be.gt(e(81)); // principal + ROI + 45 net
+
+      // cap is now 0, so a new direct credits nothing (alice is still inside her grace window)
+      await join(staking, carol, alice, 100);
+      expect((await staking.bonusInfos(alice.address)).referralGains).to.equal(e(50));
     });
   });
 
