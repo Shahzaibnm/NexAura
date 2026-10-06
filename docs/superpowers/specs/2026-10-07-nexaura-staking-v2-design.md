@@ -23,7 +23,8 @@ On $100: $5 / $5 / $9 / $81.
   creates another order.
 - **Direct income:** 5% of the full `usdAmount` ($5 on $100), converted to tokens at the live
   price, credited to the direct upline. Gated on the upline being active; clamped to cap room.
-- Business volume and CTO bonus update at stake time as today. No level income at stake time.
+- Business volume updates at stake time as today. No level income and no CTO payment at
+  stake time. The month's stake volume (USD) is accumulated for the CTO pools.
 
 ## Claim (`claimOrder(orderId)`)
 
@@ -58,6 +59,17 @@ On $100: $5 / $5 / $9 / $81.
 - **Claimables:** every income other than the principal+ROI claim (direct, level, rank, DAO,
   spot, CTO) accrues as a token claimable balance; the user claims it and receives tokens.
 
+## CTO bonus (monthly, owner-run)
+
+- Revenue = total stake volume (USD) of the month, accumulated in `makeStake`.
+- Owner runs a distribute function once a month. Pool per tier = tier % x month's revenue:
+  Core 1 2%, Core 2 1%, Core 3 1% (thresholds per the deck: direct business or team matching
+  business).
+- Each tier's pool is split equally among the users qualified for that tier, converted to
+  tokens at the live price, **minted** and credited as claimable CTO gains (clamped to cap).
+- A user collects **only their highest qualified tier's** pool.
+- Example: 5 users at Core 1 share the 2% pool, one fifth each.
+
 ## Removed from the staking contract
 
 No `makeUnstake`, no token selling, no sell/burn logic here. Users claim tokens from this
@@ -65,7 +77,7 @@ contract, then swap in the token contract at its price.
 
 ## Unchanged from current contract
 
-DAO distribution, spot bonus, CTO, per-type claim functions, withdrawal minimum/daily cap and
+DAO distribution, spot bonus, per-type claim functions, withdrawal minimum/daily cap and
 fee rules (the 15% sell deduction and 100% burn live in the token contract's swap). Each income credit is gated on the
 recipient being active (or in grace).
 
