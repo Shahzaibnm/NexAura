@@ -92,8 +92,8 @@ is written.
 
 - Whether the $9 USDT reserve transfer is made by the staking contract directly or via the
   token.
-- Owner said both stake ($9) and sell deductions go to the reserve. Sell's 10% already does;
-  confirm whether sell's 5% "liquidity pool" part also goes to the reserve pool address.
+- Token contract change (confirmed): the swap's full 15% deduction goes to the reserve pool
+  address (the 5% "liquidity pool" part no longer goes to a separate liquidity address).
 - Exact definition of "working" vs "non-working" user for the 3x/2x cap (keep the current
   definition unless the deck says otherwise).
 
