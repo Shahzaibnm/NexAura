@@ -255,29 +255,39 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         );
     }
 
-    /// @dev Public swap: burns 100% of the caller's `tokenAmount`, pays the USD value at the
-    /// live rate minus a 15% deduction: 5% stays in this contract (credited back to
-    /// internalReserve, so it lifts the price) and 10% goes to the reserve pool. If
-    /// internalReserve can't cover the payout, the shortfall is pulled from the reserve pool.
+    /// @dev Moves tokens with no transfer burn (used for the sell deduction).
+    function _moveNoBurn(address sender, address recipient, uint256 amount) internal {
+        require(_balances[sender] >= amount, "NexauraToken: transfer amount exceeds balance");
+        unchecked {
+            _balances[sender] -= amount;
+        }
+        _balances[recipient] += amount;
+        emit Transfer(sender, recipient, amount);
+    }
+
+    /// @dev Public swap. The 15% deduction is taken in TOKENS: 5% of `tokenAmount` stays in this
+    /// contract and 10% goes to the reserve pool. The remaining 85% is the part actually sold:
+    /// it is burned and the seller is paid its USD value at the live rate. If internalReserve
+    /// can't cover the payout, the shortfall is pulled from the reserve pool.
     function sell(uint256 tokenAmount) external nonReentrant returns (uint256 netUsd) {
         require(tokenAmount > 0, "Amount must be greater than 0");
-        uint256 usdPaid = (tokenAmount * rateInUSDT()) / (10 ** _decimals);
 
-        _burn(msg.sender, tokenAmount);
+        uint256 lpTokens = (tokenAmount * SELL_LP_BP) / BP_DENOM;
+        uint256 reserveTokens = (tokenAmount * SELL_RESERVE_BP) / BP_DENOM;
+        uint256 soldTokens = tokenAmount - lpTokens - reserveTokens;
+        netUsd = (soldTokens * rateInUSDT()) / (10 ** _decimals);
 
-        uint256 fromReserve = usdPaid > internalReserve ? internalReserve : usdPaid;
-        uint256 shortfall = usdPaid - fromReserve;
+        _moveNoBurn(msg.sender, address(this), lpTokens);
+        _moveNoBurn(msg.sender, reservePoolAddress, reserveTokens);
+        _burn(msg.sender, soldTokens);
+
+        uint256 fromReserve = netUsd > internalReserve ? internalReserve : netUsd;
+        uint256 shortfall = netUsd - fromReserve;
         internalReserve -= fromReserve;
         if (shortfall > 0) {
             _coverShortfall(shortfall, address(this));
         }
 
-        uint256 lpCut = (usdPaid * SELL_LP_BP) / BP_DENOM;
-        uint256 reserveCut = (usdPaid * SELL_RESERVE_BP) / BP_DENOM;
-        netUsd = usdPaid - lpCut - reserveCut;
-        internalReserve += lpCut; // the 5% never leaves this contract
-
-        require(usdToken.transfer(reservePoolAddress, reserveCut), "Reserve transfer failed");
         require(usdToken.transfer(msg.sender, netUsd), "USDT transfer failed");
     }
 

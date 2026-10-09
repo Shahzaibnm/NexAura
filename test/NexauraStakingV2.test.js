@@ -389,7 +389,7 @@ describe("NexauraStakingV2 — full behaviour", function () {
   });
 
   describe("token contract", function () {
-    it("sell burns 100% of the tokens; of the 15% deduction 5% stays in the token and 10% goes to the reserve pool", async function () {
+    it("sell takes the 15% in tokens (5% stays in the token, 10% to the reserve pool) and burns + pays USDT for the other 85%", async function () {
       const { owner, u, usdt, reserve, token, staking } = await deploy();
       const [alice] = u;
       await join(staking, alice, owner, 100);
@@ -398,21 +398,27 @@ describe("NexauraStakingV2 — full behaviour", function () {
 
       const bal = await token.balanceOf(alice.address);
       const rate = await token.rateInUSDT();
-      const usdPaid = (bal * rate) / e(1);
-      const lpCut = (usdPaid * 500n) / 10000n;
-      const cut = (usdPaid * 1000n) / 10000n;
-      const reserveInternalBefore = await token.internalReserve();
+      const lpTokens = (bal * 500n) / 10000n;
+      const reserveTokens = (bal * 1000n) / 10000n;
+      const sold = bal - lpTokens - reserveTokens;
+      const usdOut = (sold * rate) / e(1);
+
       const supplyBefore = await token.totalSupply();
-      const poolBefore = await usdt.balanceOf(await reserve.getAddress());
+      const tokenSelfBefore = await token.balanceOf(await token.getAddress());
+      const poolTokensBefore = await token.balanceOf(await reserve.getAddress());
+      const poolUsdtBefore = await usdt.balanceOf(await reserve.getAddress());
       const usdtBefore = await usdt.balanceOf(alice.address);
+      const internalBefore = await token.internalReserve();
 
       await token.connect(alice).sell(bal);
 
       expect(await token.balanceOf(alice.address)).to.equal(0n);
-      expect(await token.totalSupply()).to.equal(supplyBefore - bal);
-      expect((await usdt.balanceOf(await reserve.getAddress())) - poolBefore).to.equal(cut);
-      expect((await usdt.balanceOf(alice.address)) - usdtBefore).to.equal(usdPaid - cut - lpCut);
-      expect(await token.internalReserve()).to.equal(reserveInternalBefore - usdPaid + lpCut); // 5% stays
+      expect((await token.balanceOf(await token.getAddress())) - tokenSelfBefore).to.equal(lpTokens);
+      expect((await token.balanceOf(await reserve.getAddress())) - poolTokensBefore).to.equal(reserveTokens);
+      expect(await token.totalSupply()).to.equal(supplyBefore - sold); // only the sold part is burned
+      expect((await usdt.balanceOf(alice.address)) - usdtBefore).to.equal(usdOut);
+      expect(await usdt.balanceOf(await reserve.getAddress())).to.equal(poolUsdtBefore); // no USDT to the pool
+      expect(await token.internalReserve()).to.equal(internalBefore - usdOut);
     });
 
     it("normal user-to-user transfers still burn 1%", async function () {
