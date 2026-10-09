@@ -50,22 +50,22 @@ async function join(staking, user, referral, amount) {
 
 describe("NexauraStakingV2 — full behaviour", function () {
   describe("stake", function () {
-    it("splits $100 as $5 creator / $9 reserve pool / $5 DAO held / $81 minted and locked", async function () {
+    it("splits $100 as $5 creator / $9 reserve pool / $5 DAO tokens / $81 minted and locked", async function () {
       const { owner, creatorFee, u, usdt, reserve, token, staking } = await deploy();
       const [alice] = u;
       await join(staking, alice, owner, 100);
 
       expect(await usdt.balanceOf(creatorFee.address)).to.equal(e(5));
       expect(await usdt.balanceOf(await reserve.getAddress())).to.equal(e(9));
-      expect(await staking.DAO_Amount()).to.equal(e(5));
-      expect(await usdt.balanceOf(await staking.getAddress())).to.equal(e(5));
-      expect(await usdt.balanceOf(await token.getAddress())).to.equal(e(81));
-      expect(await token.internalReserve()).to.equal(e(81));
+      expect(await staking.DAO_Amount()).to.equal(e(5)); // $5 of tokens, held for the DAO
+      expect(await usdt.balanceOf(await staking.getAddress())).to.equal(0n); // no USDT left here
+      expect(await usdt.balanceOf(await token.getAddress())).to.equal(e(86)); // 81 + 5 DAO
+      expect(await token.internalReserve()).to.equal(e(86));
 
       const order = await staking.stakeInfos(1);
       expect(order.lockedTokens).to.equal(e(81));
       expect(order.usdAmount).to.equal(e(100));
-      expect(await token.balanceOf(await staking.getAddress())).to.equal(e(81)); // locked here
+      expect(await token.balanceOf(await staking.getAddress())).to.equal(e(86)); // 81 locked + 5 DAO
       expect(await token.balanceOf(alice.address)).to.equal(0n); // nothing to the user's wallet
     });
 
@@ -117,7 +117,7 @@ describe("NexauraStakingV2 — full behaviour", function () {
       expect(await token.balanceOf(alice.address)).to.equal(e(81) + e("9.1125"));
       expect(await token.balanceOf(creatorFee.address)).to.equal(e("0.50625"));
       expect(await staking.dailySpotBonusPool()).to.equal(e("0.50625"));
-      expect(await token.balanceOf(await staking.getAddress())).to.equal(0n);
+      expect(await token.balanceOf(await staking.getAddress())).to.equal(e(5)); // only the DAO pool left
     });
 
     it("cannot be claimed twice or by someone else", async function () {
@@ -306,12 +306,12 @@ describe("NexauraStakingV2 — full behaviour", function () {
   });
 
   describe("DAO", function () {
-    it("credits the pool to qualified users as tokens and moves the USDT into the token reserve", async function () {
-      const { owner, u, usdt, token, staking } = await deploy();
+    it("holds the 5% as tokens, credits winners from them, keeps the remainder, and pays claims without minting", async function () {
+      const { owner, creatorFee, u, usdt, token, staking } = await deploy();
       const [a1, d] = u;
       await join(staking, a1, owner, 100);
       await join(staking, d, a1, 500); // a1 direct business 500 -> DAO share 1
-      expect(await staking.DAO_Amount()).to.equal(e(30)); // 5% of 600
+      expect(await staking.DAO_Amount()).to.equal(e(30)); // 5% of 600, in tokens
 
       await pass(7 * DAY + 60);
       await expect(staking.connect(a1).distributeDAO()).to.be.revertedWithCustomError(
@@ -320,11 +320,28 @@ describe("NexauraStakingV2 — full behaviour", function () {
       );
 
       const reserveBefore = await token.internalReserve();
+      const usdtBefore = await usdt.balanceOf(await token.getAddress());
       await staking.connect(owner).distributeDAO();
       expect((await staking.bonusInfos(a1.address)).daoGains).to.equal(e(30));
       expect(await staking.DAO_Amount()).to.equal(0n);
-      expect(await usdt.balanceOf(await staking.getAddress())).to.equal(0n);
-      expect(await token.internalReserve()).to.equal(reserveBefore + e(30));
+      expect(await token.internalReserve()).to.equal(reserveBefore); // no USDT movement
+      expect(await usdt.balanceOf(await token.getAddress())).to.equal(usdtBefore);
+
+      // claim: 30 held tokens -> 27 net to a1, 1.5 creator, 1.5 burned into the spot pool ledger
+      const supplyBefore = await token.totalSupply();
+      await staking.connect(a1).claimDaoGains();
+      expect(await token.balanceOf(a1.address)).to.equal(e(27));
+      expect(await token.balanceOf(creatorFee.address)).to.equal(e("1.5"));
+      expect(await staking.dailySpotBonusPool()).to.equal(e("1.5"));
+      expect(await token.totalSupply()).to.equal(supplyBefore - e("1.5"));
+    });
+
+    it("keeps the pool for the next run when nobody qualifies", async function () {
+      const { owner, u, staking } = await deploy();
+      await join(staking, u[0], owner, 100); // no DAO-qualified users
+      await pass(7 * DAY + 60);
+      await staking.connect(owner).distributeDAO();
+      expect(await staking.DAO_Amount()).to.equal(e(5)); // carried over, not lost
     });
   });
 

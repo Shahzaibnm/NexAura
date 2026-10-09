@@ -7,7 +7,7 @@ interface INexauraToken {
     function reservePoolAddress() external view returns (address);
     function pricedBuy(uint256 usdAmount, address forAddress) external returns (uint256);
     function mintTo(address to, uint256 amount) external;
-    function creditReserve(uint256 usdAmount) external;
+    function burnHeld(uint256 amount) external;
     function transfer(address to, uint256 amount) external returns (bool);
 }
 
@@ -121,7 +121,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     uint256 public constant WITHDRAW_CREATOR_BP = 500; // 5% of the reward
     uint256 public constant WITHDRAW_SPOTBONUS_BP = 500; // 5% of the reward
 
-    uint256 public DAO_Amount; // USDT held, forwarded to the token reserve at distributeDAO
+    uint256 public DAO_Amount; // TOKENS held in this contract for DAO distribution (5% of each stake)
     uint256 public allStake;
     uint256 public dailySpotBonusPool; // TOKENS, fed by the 5% claim cut
     uint256 public monthVolumeUsd; // stake volume since the last CTO run
@@ -449,12 +449,12 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             usdToken.transfer(token.reservePoolAddress(), reserveCut),
             "Reserve transfer failed"
         );
-        DAO_Amount += daoCut;
         require(
-            usdToken.transfer(address(token), mintUsd),
+            usdToken.transfer(address(token), mintUsd + daoCut),
             "Mint funding transfer failed"
         );
         uint256 locked = token.pricedBuy(mintUsd, address(this)); // locked in this contract
+        DAO_Amount += token.pricedBuy(daoCut, address(this)); // DAO pool, held as tokens
 
         allStake++;
         stakeInfos[allStake] = Order(msg.sender, usdAmount, locked, block.timestamp, false);
@@ -636,8 +636,9 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     }
 
     // ponytail: iterates every DAO-qualified user; paginate if that set grows large.
-    // Winners' shares are credited as tokens (minted at claim); the whole USDT pool then moves
-    // into the token's reserve to back them.
+    // The pool is TOKENS already held by this contract (minted at stake time). Winners' shares
+    // are credited as claimable gains; whatever isn't credited (nobody qualified, cap-clamped
+    // or inactive users) stays in the pool for the next run.
     function distributeDAO() external onlyOwner nonReentrant {
         require(block.timestamp >= lastDaoDistribution + DAO_DIST_INTERVAL, "Too soon");
 
@@ -647,27 +648,23 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         }
 
         uint256 pool = DAO_Amount;
+        uint256 paid;
         if (totalShares > 0 && pool > 0) {
             for (uint256 i; i < daoQualifiedUsers.length; i++) {
                 address u = daoQualifiedUsers[i];
                 uint256 share = userInfos[u].daoShare;
                 if (share == 0 || !_canEarn(u)) continue;
-                uint256 payoutUsd = (pool * share) / totalShares;
-                if (payoutUsd == 0) continue;
-                uint256 amt = _clampToCapRoom(u, _toTokenAmount(payoutUsd));
+                uint256 amt = _clampToCapRoom(u, (pool * share) / totalShares);
                 if (amt > 0) {
                     bonusInfos[u].daoGains += amt;
+                    paid += amt;
                     emit IncomeCredited(u, u, amt, 7);
                 }
             }
         }
 
-        if (pool > 0) {
-            require(usdToken.transfer(address(token), pool), "Reserve funding failed");
-            token.creditReserve(pool);
-        }
         emit DaoDistributed(pool, totalShares);
-        DAO_Amount = 0;
+        DAO_Amount = pool - paid;
         lastDaoDistribution = block.timestamp;
     }
 
@@ -805,6 +802,25 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         emit Withdrawn(user, amount, net, gainType);
     }
 
+    // DAO gains are already-minted tokens held here, so nothing is minted: net and the creator
+    // cut are transferred out (no burn for staking-sourced transfers); the 5% spot cut is burned
+    // and enters the spot pool as a ledger figure, minted later when spot winners claim.
+    function _claimDaoFromHeld(address user, uint256 amount) internal {
+        require(amount > 0, "Nothing to claim");
+        uint256 usdValue = _toUsdAmount(amount);
+        require(usdValue >= MIN_WITHDRAW, "Below minimum withdrawal");
+        _checkDailyCap(user, usdValue);
+
+        uint256 creatorCut = (amount * WITHDRAW_CREATOR_BP) / BP_DENOM;
+        uint256 spotCut = (amount * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
+        uint256 net = amount - creatorCut - spotCut;
+        dailySpotBonusPool += spotCut;
+        token.burnHeld(spotCut);
+        require(token.transfer(creatorFeeAddress, creatorCut), "Creator transfer failed");
+        require(token.transfer(user, net), "Withdrawal transfer failed");
+        emit Withdrawn(user, amount, net, 7);
+    }
+
     function claimReferralGains() external nonReentrant {
         uint256 amount = claimableReferralGains(msg.sender);
         bonusInfos[msg.sender].referralClaimed += amount;
@@ -838,6 +854,6 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     function claimDaoGains() external nonReentrant {
         uint256 amount = claimableDaoGains(msg.sender);
         bonusInfos[msg.sender].daoClaimed += amount;
-        _claimIncome(msg.sender, amount, 7);
+        _claimDaoFromHeld(msg.sender, amount);
     }
 }
