@@ -76,7 +76,8 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
     string private _symbol;
 
     uint256 public constant TRANSFER_BURN_BP = 100; // 1%
-    uint256 public constant SELL_RESERVE_BP = 1500; // 15%, all to the reserve pool
+    uint256 public constant SELL_LP_BP = 500; // 5% of a sale stays in this contract's reserve
+    uint256 public constant SELL_RESERVE_BP = 1000; // 10% of a sale goes to the reserve pool
     uint256 public constant BP_DENOM = 10000;
     uint256 public InitialRate = 1e18;
 
@@ -255,7 +256,8 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
     }
 
     /// @dev Public swap: burns 100% of the caller's `tokenAmount`, pays the USD value at the
-    /// live rate minus a 15% deduction that goes entirely to the reserve pool. If
+    /// live rate minus a 15% deduction: 5% stays in this contract (credited back to
+    /// internalReserve, so it lifts the price) and 10% goes to the reserve pool. If
     /// internalReserve can't cover the payout, the shortfall is pulled from the reserve pool.
     function sell(uint256 tokenAmount) external nonReentrant returns (uint256 netUsd) {
         require(tokenAmount > 0, "Amount must be greater than 0");
@@ -270,8 +272,10 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
             _coverShortfall(shortfall, address(this));
         }
 
+        uint256 lpCut = (usdPaid * SELL_LP_BP) / BP_DENOM;
         uint256 reserveCut = (usdPaid * SELL_RESERVE_BP) / BP_DENOM;
-        netUsd = usdPaid - reserveCut;
+        netUsd = usdPaid - lpCut - reserveCut;
+        internalReserve += lpCut; // the 5% never leaves this contract
 
         require(usdToken.transfer(reservePoolAddress, reserveCut), "Reserve transfer failed");
         require(usdToken.transfer(msg.sender, netUsd), "USDT transfer failed");

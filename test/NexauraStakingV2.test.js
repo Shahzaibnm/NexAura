@@ -389,7 +389,7 @@ describe("NexauraStakingV2 — full behaviour", function () {
   });
 
   describe("token contract", function () {
-    it("sell burns 100% of the tokens, sends the 15% deduction to the reserve pool, pays 85% to the seller", async function () {
+    it("sell burns 100% of the tokens; of the 15% deduction 5% stays in the token and 10% goes to the reserve pool", async function () {
       const { owner, u, usdt, reserve, token, staking } = await deploy();
       const [alice] = u;
       await join(staking, alice, owner, 100);
@@ -399,7 +399,9 @@ describe("NexauraStakingV2 — full behaviour", function () {
       const bal = await token.balanceOf(alice.address);
       const rate = await token.rateInUSDT();
       const usdPaid = (bal * rate) / e(1);
-      const cut = (usdPaid * 1500n) / 10000n;
+      const lpCut = (usdPaid * 500n) / 10000n;
+      const cut = (usdPaid * 1000n) / 10000n;
+      const reserveInternalBefore = await token.internalReserve();
       const supplyBefore = await token.totalSupply();
       const poolBefore = await usdt.balanceOf(await reserve.getAddress());
       const usdtBefore = await usdt.balanceOf(alice.address);
@@ -409,7 +411,8 @@ describe("NexauraStakingV2 — full behaviour", function () {
       expect(await token.balanceOf(alice.address)).to.equal(0n);
       expect(await token.totalSupply()).to.equal(supplyBefore - bal);
       expect((await usdt.balanceOf(await reserve.getAddress())) - poolBefore).to.equal(cut);
-      expect((await usdt.balanceOf(alice.address)) - usdtBefore).to.equal(usdPaid - cut);
+      expect((await usdt.balanceOf(alice.address)) - usdtBefore).to.equal(usdPaid - cut - lpCut);
+      expect(await token.internalReserve()).to.equal(reserveInternalBefore - usdPaid + lpCut); // 5% stays
     });
 
     it("normal user-to-user transfers still burn 1%", async function () {
