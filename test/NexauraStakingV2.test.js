@@ -79,6 +79,20 @@ describe("NexauraStakingV2 — full behaviour", function () {
       expect((await staking.bonusInfos(alice.address)).referralGains).to.equal(e(5));
     });
 
+    it("direct income is on new money only: first stake in full, recycle pays nothing, an increase pays on the difference", async function () {
+      const { owner, u, staking } = await deploy();
+      const [alice, bob] = u;
+      await join(staking, alice, owner, 100);
+      await join(staking, bob, alice, 100);
+      expect((await staking.bonusInfos(alice.address)).referralGains).to.equal(e(5)); // 5% of 100
+
+      await staking.connect(bob).makeStake(e(100)); // same size = recycle
+      expect((await staking.bonusInfos(alice.address)).referralGains).to.equal(e(5)); // unchanged
+
+      await staking.connect(bob).makeStake(e(110)); // +10 over the last stake
+      expect((await staking.bonusInfos(alice.address)).referralGains).to.equal(e("5.5")); // + 5% of 10 = 0.5
+    });
+
     it("rejects bad package amounts, a decreasing package, and unstaked referrals", async function () {
       const { owner, u, staking } = await deploy();
       const [alice, bob] = u;

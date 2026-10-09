@@ -431,6 +431,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         require(usdAmount >= u.lastStake, "Package must not decrease");
 
         bool isFirstStake = u.stakeOrders.length == 0;
+        uint256 newDeposit = usdAmount - u.lastStake; // direct income applies to new money only
         require(
             usdToken.transferFrom(msg.sender, address(this), usdAmount),
             "USDT transfer failed"
@@ -465,11 +466,12 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             userInfos[upline].directJoinTimes.push(block.timestamp);
         }
 
-        // Direct income: 5% of the FULL stake, as tokens at the live rate.
-        if (upline != address(0) && _canEarn(upline)) {
+        // Direct income: 5% of the new deposit only (first stake in full, a same-size recycle
+        // pays nothing, an increase pays on the difference), as tokens at the live rate.
+        if (newDeposit > 0 && upline != address(0) && _canEarn(upline)) {
             uint256 directAmt = _clampToCapRoom(
                 upline,
-                _toTokenAmount((usdAmount * DIRECT_INCOME_BP) / BP_DENOM)
+                _toTokenAmount((newDeposit * DIRECT_INCOME_BP) / BP_DENOM)
             );
             if (directAmt > 0) {
                 bonusInfos[upline].referralGains += directAmt;
