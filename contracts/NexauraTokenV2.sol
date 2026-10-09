@@ -282,11 +282,6 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         _mint(to, amount);
     }
 
-    /// @dev Burns tokens held by the staking contract (the spot-bonus cut of a DAO claim).
-    function burnHeld(uint256 amount) external onlyStaking {
-        _burn(msg.sender, amount);
-    }
-
     /// @dev Credits `usdAmount` into internalReserve, backing the token price. Same push-then-credit pattern as pricedBuy: the caller (staking contract) must
     /// have already transferred that USDT into this contract in the same call chain -- this only
     /// updates the internal accounting to match, it never pulls funds itself.

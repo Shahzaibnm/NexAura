@@ -7,7 +7,6 @@ interface INexauraToken {
     function reservePoolAddress() external view returns (address);
     function pricedBuy(uint256 usdAmount, address forAddress) external returns (uint256);
     function mintTo(address to, uint256 amount) external;
-    function burnHeld(uint256 amount) external;
     function transfer(address to, uint256 amount) external returns (bool);
 }
 
@@ -545,7 +544,8 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         withdrawnToday[user] += usdValue;
     }
 
-    // Returns principal tokens + ROI. ROI is minted; a 10% fee is taken from the ROI only.
+    // Returns principal tokens + ROI (only the ROI is minted); a 10% cut (5% creator, 5% spot
+    // pool) is taken from the whole payout.
     // Exempt from MIN_WITHDRAW (a $10 package locks ~$8.10 of tokens).
     function claimOrder(uint256 orderId) external nonReentrant {
         Order storage o = stakeInfos[orderId];
@@ -563,15 +563,18 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         }
         o.claimed = true;
 
-        uint256 creatorCut = (roi * WITHDRAW_CREATOR_BP) / BP_DENOM;
-        uint256 spotCut = (roi * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
-        uint256 netRoi = roi - creatorCut - spotCut;
+        // Only the ROI is newly minted (to this contract). The 5% creator and 5% spot cuts are
+        // taken from the whole payout (principal + ROI); the spot cut stays here as real tokens.
+        if (roi > 0) token.mintTo(address(this), roi);
+        uint256 total = o.lockedTokens + roi;
+        uint256 creatorCut = (total * WITHDRAW_CREATOR_BP) / BP_DENOM;
+        uint256 spotCut = (total * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
+        uint256 net = total - creatorCut - spotCut;
         dailySpotBonusPool += spotCut;
-        if (creatorCut > 0) token.mintTo(creatorFeeAddress, creatorCut);
-        if (netRoi > 0) token.mintTo(msg.sender, netRoi);
-        require(token.transfer(msg.sender, o.lockedTokens), "Principal transfer failed");
+        require(token.transfer(creatorFeeAddress, creatorCut), "Creator transfer failed");
+        require(token.transfer(msg.sender, net), "Payout transfer failed");
 
-        _checkDailyCap(msg.sender, _toUsdAmount(o.lockedTokens + netRoi));
+        _checkDailyCap(msg.sender, _toUsdAmount(net));
         if (roi > 0) _distributeLevelIncome(msg.sender, roi);
 
         emit OrderClaimed(msg.sender, orderId, o.lockedTokens, roi);
@@ -784,7 +787,8 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         return _claimableOfType(u, b.daoGains, b.daoClaimed);
     }
 
-    // Mints the net amount to the user; 5% creator is minted, 5% goes to the spot-bonus pool.
+    // Mints the net amount to the user; 5% creator is minted, 5% is minted into this contract
+    // as the spot-bonus pool.
     function _claimIncome(address user, uint256 amount, uint8 gainType) internal {
         require(amount > 0, "Nothing to claim");
         uint256 usdValue = _toUsdAmount(amount);
@@ -796,14 +800,15 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 net = amount - creatorCut - spotCut;
         dailySpotBonusPool += spotCut;
         token.mintTo(creatorFeeAddress, creatorCut);
+        token.mintTo(address(this), spotCut); // spot pool is held as real tokens
         token.mintTo(user, net);
         emit Withdrawn(user, amount, net, gainType);
     }
 
-    // DAO gains are already-minted tokens held here, so nothing is minted: net and the creator
-    // cut are transferred out (no burn for staking-sourced transfers); the 5% spot cut is burned
-    // and enters the spot pool as a ledger figure, minted later when spot winners claim.
-    function _claimDaoFromHeld(address user, uint256 amount) internal {
+    // DAO and spot-bonus gains are already-minted tokens held here, so nothing is minted: net
+    // and the creator cut are transferred out (no burn for staking-sourced transfers); the 5%
+    // spot cut simply stays held and goes back into the spot pool.
+    function _claimFromHeld(address user, uint256 amount, uint8 gainType) internal {
         require(amount > 0, "Nothing to claim");
         uint256 usdValue = _toUsdAmount(amount);
         require(usdValue >= MIN_WITHDRAW, "Below minimum withdrawal");
@@ -813,10 +818,9 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 spotCut = (amount * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
         uint256 net = amount - creatorCut - spotCut;
         dailySpotBonusPool += spotCut;
-        token.burnHeld(spotCut);
         require(token.transfer(creatorFeeAddress, creatorCut), "Creator transfer failed");
         require(token.transfer(user, net), "Withdrawal transfer failed");
-        emit Withdrawn(user, amount, net, 7);
+        emit Withdrawn(user, amount, net, gainType);
     }
 
     function claimReferralGains() external nonReentrant {
@@ -846,12 +850,12 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     function claimSpotBonusGains() external nonReentrant {
         uint256 amount = claimableSpotBonusGains(msg.sender);
         bonusInfos[msg.sender].spotBonusClaimed += amount;
-        _claimIncome(msg.sender, amount, 6);
+        _claimFromHeld(msg.sender, amount, 6);
     }
 
     function claimDaoGains() external nonReentrant {
         uint256 amount = claimableDaoGains(msg.sender);
         bonusInfos[msg.sender].daoClaimed += amount;
-        _claimDaoFromHeld(msg.sender, amount);
+        _claimFromHeld(msg.sender, amount, 7);
     }
 }

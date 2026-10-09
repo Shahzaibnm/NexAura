@@ -122,19 +122,22 @@ describe("NexauraStakingV2 — full behaviour", function () {
   });
 
   describe("claimOrder", function () {
-    it("returns principal with no 1% burn, mints 12.5% ROI less the 10% fee, and fills the spot pool", async function () {
+    it("mints only the ROI; 5% creator and 5% spot are cut from principal + ROI (91.125), spot kept as held tokens", async function () {
       const { owner, creatorFee, u, token, staking } = await deploy();
       const [alice] = u;
       await join(staking, alice, owner, 100);
       await pass(10 * DAY + 60);
       const creatorBefore = await token.balanceOf(creatorFee.address);
+      const supplyBefore = await token.totalSupply();
       await staking.connect(alice).claimOrder(1);
 
-      // roi = 81 * 12.5% = 10.125; creator 5% = 0.50625; spot pool 5% = 0.50625; net = 9.1125
-      expect(await token.balanceOf(alice.address)).to.equal(e(81) + e("9.1125"));
-      expect((await token.balanceOf(creatorFee.address)) - creatorBefore).to.equal(e("0.50625"));
-      expect(await staking.dailySpotBonusPool()).to.equal(e("0.50625"));
-      expect(await token.balanceOf(await staking.getAddress())).to.equal(e(5)); // only the DAO pool left
+      // roi = 81 * 12.5% = 10.125 -> total 91.125; creator 5% = 4.55625; spot 5% = 4.55625
+      expect(await token.balanceOf(alice.address)).to.equal(e("82.0125")); // 91.125 - 9.1125
+      expect((await token.balanceOf(creatorFee.address)) - creatorBefore).to.equal(e("4.55625"));
+      expect(await staking.dailySpotBonusPool()).to.equal(e("4.55625"));
+      expect(await token.totalSupply()).to.equal(supplyBefore + e("10.125")); // only the ROI is minted
+      // held here: the DAO pool (5) + the spot cut (4.55625)
+      expect(await token.balanceOf(await staking.getAddress())).to.equal(e("9.55625"));
     });
 
     it("cannot be claimed twice or by someone else", async function () {
@@ -345,14 +348,14 @@ describe("NexauraStakingV2 — full behaviour", function () {
       expect(await token.internalReserve()).to.equal(reserveBefore); // no USDT movement
       expect(await usdt.balanceOf(await token.getAddress())).to.equal(usdtBefore);
 
-      // claim: 30 held tokens -> 27 net to a1, 1.5 creator, 1.5 burned into the spot pool ledger
+      // claim: 30 held tokens -> 27 net to a1, 1.5 creator, 1.5 stays held for the spot pool
       const supplyBefore = await token.totalSupply();
       const creatorBefore = await token.balanceOf(creatorFee.address);
       await staking.connect(a1).claimDaoGains();
       expect(await token.balanceOf(a1.address)).to.equal(e(27));
       expect((await token.balanceOf(creatorFee.address)) - creatorBefore).to.equal(e("1.5"));
       expect(await staking.dailySpotBonusPool()).to.equal(e("1.5"));
-      expect(await token.totalSupply()).to.equal(supplyBefore - e("1.5"));
+      expect(await token.totalSupply()).to.equal(supplyBefore); // nothing minted or burned
     });
 
     it("keeps the pool for the next run when nobody qualifies", async function () {
@@ -371,15 +374,15 @@ describe("NexauraStakingV2 — full behaviour", function () {
       await join(staking, alice, owner, 100);
       await join(staking, bob, owner, 100);
       await pass(10 * DAY + 60);
-      await staking.connect(bob).claimOrder(2); // fills the pool with 5% of 10.125
-      expect(await staking.dailySpotBonusPool()).to.equal(e("0.50625"));
+      await staking.connect(bob).claimOrder(2); // fills the pool with 5% of 91.125
+      expect(await staking.dailySpotBonusPool()).to.equal(e("4.55625"));
 
       await join(staking, carol, alice, 100); // two directs inside 24h, each >= $50
       await join(staking, dave, alice, 100);
       expect(await staking.qualifiesForSpotBonus(alice.address)).to.equal(true);
 
       await staking.connect(owner).distributeSpotBonus([alice.address, alice.address, bob.address]);
-      expect((await staking.bonusInfos(alice.address)).spotBonusGains).to.equal(e("0.50625"));
+      expect((await staking.bonusInfos(alice.address)).spotBonusGains).to.equal(e("4.55625"));
       expect((await staking.bonusInfos(bob.address)).spotBonusGains).to.equal(0n);
       expect(await staking.dailySpotBonusPool()).to.equal(0n);
     });
