@@ -196,7 +196,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     }
 
     mapping(address => UserInfo) public userInfos;
-    mapping(uint256 => Order) public stakeInfos;
+    mapping(uint256 => Order) internal stakeInfos;
     mapping(address => BonusInfo) public bonusInfos;
     mapping(uint256 => RankTier) public rankTiers; // index 0 = tier 1
     mapping(uint256 => DaoTier) public daoTiers;
@@ -732,6 +732,18 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
         emit SpotBonusDistributed(pool, qualifiedCount);
         lastSpotBonusDistribution = block.timestamp;
+    }
+
+    // Order details for the UI; lockedTokens is deliberately not exposed here.
+    function getOrder(
+        uint256 orderId
+    )
+        external
+        view
+        returns (address ownerAddress, uint256 usdAmount, uint256 startTime, bool claimed)
+    {
+        Order storage o = stakeInfos[orderId];
+        return (o.ownerAddress, o.usdAmount, o.startTime, o.claimed);
     }
 
     function capOf(address user) external view returns (uint256) {

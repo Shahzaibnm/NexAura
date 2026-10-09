@@ -64,9 +64,9 @@ describe("NexauraStakingV2 — full behaviour", function () {
       expect(await token.internalReserve()).to.equal(e(100));
       expect(await token.totalSupply()).to.equal(e(100)); // 81 + 5 + 5 + 9, rate stays $1
 
-      const order = await staking.stakeInfos(1);
-      expect(order.lockedTokens).to.equal(e(81));
+      const order = await staking.getOrder(1); // lockedTokens is not exposed; the 81 is checked via balances
       expect(order.usdAmount).to.equal(e(100));
+      expect(order.claimed).to.equal(false);
       expect(await token.balanceOf(await staking.getAddress())).to.equal(e(86)); // 81 locked + 5 DAO
       expect(await token.balanceOf(alice.address)).to.equal(0n); // nothing to the user's wallet
     });

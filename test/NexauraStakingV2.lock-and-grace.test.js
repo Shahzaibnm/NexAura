@@ -71,9 +71,7 @@ describe("NexauraStakingV2 — lock period, fixed ROI, 17-day income window", fu
     await chain(ctx);
     const { alice, bob, staking } = ctx;
 
-    const aliceLocked = (await staking.stakeInfos(1)).lockedTokens;
-    const bobLocked = (await staking.stakeInfos(2)).lockedTokens;
-    expect(aliceLocked).to.equal(bobLocked);
+    const locked = e(81); // $100 stake at the $1 rate (lockedTokens is not exposed by the contract)
 
     await pass(10 * DAY + 60);
     await staking.connect(alice).claimOrder(1); // claimed right at maturity
@@ -83,7 +81,7 @@ describe("NexauraStakingV2 — lock period, fixed ROI, 17-day income window", fu
     await staking.connect(bob).claimOrder(2);
     const bobRoi = (await staking.bonusInfos(bob.address)).roiGains;
 
-    const expected = (bobLocked * 1250n) / 10000n;
+    const expected = (locked * 1250n) / 10000n;
     expect(aliceRoi).to.equal(expected);
     expect(bobRoi).to.equal(expected); // no extra ROI for the 30 days of waiting
   });
