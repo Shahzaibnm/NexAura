@@ -206,7 +206,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     mapping(address => bool) public isDaoQualified;
 
     event RegisterUser(address indexed user, address indexed referral);
-    event Staked(address indexed user, uint256 orderId, uint256 usdAmount, uint256 lockedTokens);
+    event Staked(address indexed user, uint256 orderId, uint256 usdAmount);
     event OrderClaimed(address indexed user, uint256 orderId, uint256 principal, uint256 roi);
     event IncomeCredited(
         address indexed from,
@@ -481,7 +481,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         _updateBusinessToUpline(upline, usdAmount);
         _updateRank(msg.sender);
 
-        emit Staked(msg.sender, allStake, usdAmount, locked);
+        emit Staked(msg.sender, allStake, usdAmount);
         return true;
     }
 
