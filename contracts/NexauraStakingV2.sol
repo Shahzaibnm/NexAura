@@ -98,7 +98,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
     uint256 public constant CREATOR_FEE_BP = 500; // 5%
     uint256 public constant DAO_FEE_BP = 500; // 5%
-    uint256 public constant RESERVE_FEE_BP = 900; // 9% (10% of the 90%)
+    uint256 public constant RESERVE_FEE_BP = 900; // 9% liquidity share (10% of the 90%), minted to the token contract
     uint256 public constant DIRECT_INCOME_BP = 500; // 5% of the full stake
     uint256 public constant MIN_PACKAGE_FOR_LEVEL_INCOME = 50 * BASE;
 
@@ -438,23 +438,19 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
         uint256 creatorCut = (usdAmount * CREATOR_FEE_BP) / BP_DENOM;
         uint256 daoCut = (usdAmount * DAO_FEE_BP) / BP_DENOM;
-        uint256 reserveCut = (usdAmount * RESERVE_FEE_BP) / BP_DENOM;
-        uint256 mintUsd = usdAmount - creatorCut - daoCut - reserveCut;
+        uint256 lpCut = (usdAmount * RESERVE_FEE_BP) / BP_DENOM;
+        uint256 mintUsd = usdAmount - creatorCut - daoCut - lpCut;
 
+        // The whole deposit backs the token; every share below is minted as tokens at the live
+        // rate (the rate does not move between these buys, so they all price the same).
         require(
-            usdToken.transfer(creatorFeeAddress, creatorCut),
-            "Creator fee transfer failed"
-        );
-        require(
-            usdToken.transfer(token.reservePoolAddress(), reserveCut),
-            "Reserve transfer failed"
-        );
-        require(
-            usdToken.transfer(address(token), mintUsd + daoCut),
+            usdToken.transfer(address(token), usdAmount),
             "Mint funding transfer failed"
         );
-        uint256 locked = token.pricedBuy(mintUsd, address(this)); // locked in this contract
+        uint256 locked = token.pricedBuy(mintUsd, address(this)); // principal, locked here
         DAO_Amount += token.pricedBuy(daoCut, address(this)); // DAO pool, held as tokens
+        token.pricedBuy(creatorCut, creatorFeeAddress); // creator's 5%, as tokens
+        token.pricedBuy(lpCut, address(token)); // liquidity share, sent back to the token contract
 
         allStake++;
         stakeInfos[allStake] = Order(msg.sender, usdAmount, locked, block.timestamp, false);

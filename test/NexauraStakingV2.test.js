@@ -50,17 +50,19 @@ async function join(staking, user, referral, amount) {
 
 describe("NexauraStakingV2 — full behaviour", function () {
   describe("stake", function () {
-    it("splits $100 as $5 creator / $9 reserve pool / $5 DAO tokens / $81 minted and locked", async function () {
-      const { owner, creatorFee, u, usdt, reserve, token, staking } = await deploy();
+    it("puts all $100 in the token and mints $5 creator / $5 DAO / $9 token-contract / $81 locked tokens", async function () {
+      const { owner, creatorFee, u, usdt, token, staking } = await deploy();
       const [alice] = u;
       await join(staking, alice, owner, 100);
 
-      expect(await usdt.balanceOf(creatorFee.address)).to.equal(e(5));
-      expect(await usdt.balanceOf(await reserve.getAddress())).to.equal(e(9));
+      expect(await usdt.balanceOf(creatorFee.address)).to.equal(0n); // creator is paid in tokens
+      expect(await token.balanceOf(creatorFee.address)).to.equal(e(5));
+      expect(await token.balanceOf(await token.getAddress())).to.equal(e(9)); // liquidity share
       expect(await staking.DAO_Amount()).to.equal(e(5)); // $5 of tokens, held for the DAO
       expect(await usdt.balanceOf(await staking.getAddress())).to.equal(0n); // no USDT left here
-      expect(await usdt.balanceOf(await token.getAddress())).to.equal(e(86)); // 81 + 5 DAO
-      expect(await token.internalReserve()).to.equal(e(86));
+      expect(await usdt.balanceOf(await token.getAddress())).to.equal(e(100)); // whole deposit
+      expect(await token.internalReserve()).to.equal(e(100));
+      expect(await token.totalSupply()).to.equal(e(100)); // 81 + 5 + 5 + 9, rate stays $1
 
       const order = await staking.stakeInfos(1);
       expect(order.lockedTokens).to.equal(e(81));
@@ -111,11 +113,12 @@ describe("NexauraStakingV2 — full behaviour", function () {
       const [alice] = u;
       await join(staking, alice, owner, 100);
       await pass(10 * DAY + 60);
+      const creatorBefore = await token.balanceOf(creatorFee.address);
       await staking.connect(alice).claimOrder(1);
 
       // roi = 81 * 12.5% = 10.125; creator 5% = 0.50625; spot pool 5% = 0.50625; net = 9.1125
       expect(await token.balanceOf(alice.address)).to.equal(e(81) + e("9.1125"));
-      expect(await token.balanceOf(creatorFee.address)).to.equal(e("0.50625"));
+      expect((await token.balanceOf(creatorFee.address)) - creatorBefore).to.equal(e("0.50625"));
       expect(await staking.dailySpotBonusPool()).to.equal(e("0.50625"));
       expect(await token.balanceOf(await staking.getAddress())).to.equal(e(5)); // only the DAO pool left
     });
@@ -213,9 +216,10 @@ describe("NexauraStakingV2 — full behaviour", function () {
       await join(staking, bob, alice, 1000); // alice referralGains = 16.2
 
       await expect(staking.connect(u[5]).claimReferralGains()).to.be.revertedWith("Nothing to claim");
+      const creatorBefore = await token.balanceOf(creatorFee.address);
       await staking.connect(alice).claimReferralGains();
       expect(await token.balanceOf(alice.address)).to.equal(e("14.58"));
-      expect(await token.balanceOf(creatorFee.address)).to.equal(e("0.81"));
+      expect((await token.balanceOf(creatorFee.address)) - creatorBefore).to.equal(e("0.81"));
       expect(await staking.dailySpotBonusPool()).to.equal(e("0.81"));
       expect(await staking.claimableReferralGains(alice.address)).to.equal(0n);
 
@@ -329,9 +333,10 @@ describe("NexauraStakingV2 — full behaviour", function () {
 
       // claim: 30 held tokens -> 27 net to a1, 1.5 creator, 1.5 burned into the spot pool ledger
       const supplyBefore = await token.totalSupply();
+      const creatorBefore = await token.balanceOf(creatorFee.address);
       await staking.connect(a1).claimDaoGains();
       expect(await token.balanceOf(a1.address)).to.equal(e(27));
-      expect(await token.balanceOf(creatorFee.address)).to.equal(e("1.5"));
+      expect((await token.balanceOf(creatorFee.address)) - creatorBefore).to.equal(e("1.5"));
       expect(await staking.dailySpotBonusPool()).to.equal(e("1.5"));
       expect(await token.totalSupply()).to.equal(supplyBefore - e("1.5"));
     });
