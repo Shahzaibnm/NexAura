@@ -98,7 +98,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
     uint256 public constant CREATOR_FEE_BP = 500; // 5%
     uint256 public constant DAO_FEE_BP = 500; // 5%
-    uint256 public constant RESERVE_FEE_BP = 900; // 9% liquidity share (10% of the 90%), minted to the token contract
+    uint256 public constant LIQUIDITY_FEE_BP = 900; // 9% liquidity share (10% of the 90%), minted to the token contract
     uint256 public constant DIRECT_INCOME_BP = 500; // 5% of the full stake
     uint256 public constant MIN_PACKAGE_FOR_LEVEL_INCOME = 50 * BASE;
 
@@ -438,7 +438,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
         uint256 creatorCut = (usdAmount * CREATOR_FEE_BP) / BP_DENOM;
         uint256 daoCut = (usdAmount * DAO_FEE_BP) / BP_DENOM;
-        uint256 lpCut = (usdAmount * RESERVE_FEE_BP) / BP_DENOM;
+        uint256 lpCut = (usdAmount * LIQUIDITY_FEE_BP) / BP_DENOM;
         uint256 mintUsd = usdAmount - creatorCut - daoCut - lpCut;
 
         // The whole deposit backs the token; every share below is minted as tokens at the live
