@@ -76,8 +76,8 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
     string private _symbol;
 
     uint256 public constant TRANSFER_BURN_BP = 100; // 1%
-    uint256 public constant SELL_LP_BP = 500; // 5% of a sale stays in this contract's reserve
-    uint256 public constant SELL_RESERVE_BP = 1000; // 10% of a sale goes to the reserve pool
+    uint256 public constant SELL_LP_BP = 750; // 7.5% of a sale stays in this contract (liquidity)
+    uint256 public constant SELL_RESERVE_BP = 750; // 7.5% of a sale goes to the reserve pool
     uint256 public constant BP_DENOM = 10000;
     uint256 public InitialRate = 1e18;
 
@@ -265,8 +265,8 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         emit Transfer(sender, recipient, amount);
     }
 
-    /// @dev Public swap. The 15% deduction is taken in TOKENS: 5% of `tokenAmount` stays in this
-    /// contract and 10% goes to the reserve pool. The remaining 85% is the part actually sold:
+    /// @dev Public swap. The 15% deduction is taken in TOKENS: 7.5% of `tokenAmount` stays in this
+    /// contract and 7.5% goes to the reserve pool. The remaining 85% is the part actually sold:
     /// it is burned and the seller is paid its USD value at the live rate. If internalReserve
     /// can't cover the payout, the shortfall is pulled from the reserve pool.
     function sell(uint256 tokenAmount) external nonReentrant returns (uint256 netUsd) {

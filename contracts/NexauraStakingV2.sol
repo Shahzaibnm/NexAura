@@ -7,6 +7,7 @@ interface INexauraToken {
     function reservePoolAddress() external view returns (address);
     function pricedBuy(uint256 usdAmount, address forAddress) external returns (uint256);
     function mintTo(address to, uint256 amount) external;
+    function creditReserve(uint256 usdAmount) external;
     function transfer(address to, uint256 amount) external returns (bool);
 }
 
@@ -97,30 +98,30 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
     uint256 public constant CREATOR_FEE_BP = 500; // 5%
     uint256 public constant DAO_FEE_BP = 500; // 5%
-    uint256 public constant LIQUIDITY_FEE_BP = 900; // 9% liquidity share (10% of the 90%), minted to the token contract
+    uint256 public constant LIQUIDITY_FEE_BP = 900; // 9% USDT reserve share; no liquidity tokens minted
     uint256 public constant DIRECT_INCOME_BP = 500; // 5% of the full stake
     uint256 public constant MIN_PACKAGE_FOR_LEVEL_INCOME = 50 * BASE;
 
     uint256 public constant ROI_BP = 1250; // 1.25%/day x 10 days
-    uint256 public constant ONE_DAY = 1 days;
-    uint256 public constant MATURITY_PERIOD = 10 days;
-    uint256 public constant GRACE_PERIOD = 7 days;
+    uint256 public constant ONE_DAY = 1 minutes;
+    uint256 public constant MATURITY_PERIOD = 10 minutes;
+    uint256 public constant GRACE_PERIOD = 7 minutes;
 
     uint256 public constant WORKING_CAP_MULT = 3;
     uint256 public constant NONWORKING_CAP_MULT = 2;
     uint256 public constant MIN_DIRECTS_FOR_WORKING = 2;
 
     uint256 public constant SPOTBONUS_MIN_PACKAGE = 50 * BASE;
-    uint256 public constant SPOTBONUS_DIST_INTERVAL = 1 days;
-    uint256 public constant DAO_DIST_INTERVAL = 7 days;
-    uint256 public constant CTO_DIST_INTERVAL = 30 days;
+    uint256 public constant SPOTBONUS_DIST_INTERVAL = 1 minutes;
+    uint256 public constant DAO_DIST_INTERVAL = 7 minutes;
+    uint256 public constant CTO_DIST_INTERVAL = 30 minutes;
 
     uint256 public constant MIN_WITHDRAW = 10 * BASE;
     uint256 public constant MAX_DAILY_WITHDRAW = 3000 * BASE;
     uint256 public constant WITHDRAW_CREATOR_BP = 500; // 5% of the reward
     uint256 public constant WITHDRAW_SPOTBONUS_BP = 500; // 5% of the reward
 
-    uint256 public DAO_Amount; // TOKENS held in this contract for DAO distribution (5% of each stake)
+    uint256 public DAO_Amount; // USDT held here for DAO distribution (5% of each stake)
     uint256 public allStake;
     uint256 public dailySpotBonusPool; // TOKENS, fed by the 5% claim cut
     uint256 public monthVolumeUsd; // stake volume since the last CTO run
@@ -152,7 +153,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     struct Order {
         address ownerAddress;
         uint256 usdAmount;
-        uint256 lockedTokens;
+        uint256 releaseTokens; // 100% of the package in tokens at the stake-time rate
         uint256 startTime;
         bool claimed;
     }
@@ -360,19 +361,14 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             stakeInfos[orders[orders.length - 1]].startTime + MATURITY_PERIOD + GRACE_PERIOD;
     }
 
-    function _unclaimedLockedSum(address user) internal view returns (uint256 sum) {
-        uint256[] storage orders = userInfos[user].stakeOrders;
-        for (uint256 i; i < orders.length; i++) {
-            Order storage o = stakeInfos[orders[i]];
-            if (!o.claimed) sum += o.lockedTokens;
-        }
-    }
-
+    // Cap is always based on the user's last stake.
     function _capOf(address user) internal view returns (uint256) {
+        uint256[] storage orders = userInfos[user].stakeOrders;
+        if (orders.length == 0) return 0;
         uint256 mult = userInfos[user].directs.length >= MIN_DIRECTS_FOR_WORKING
             ? WORKING_CAP_MULT
             : NONWORKING_CAP_MULT;
-        return _unclaimedLockedSum(user) * mult;
+        return stakeInfos[orders[orders.length - 1]].releaseTokens * mult;
     }
 
     function _totalGains(address user) internal view returns (uint256) {
@@ -441,19 +437,20 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 lpCut = (usdAmount * LIQUIDITY_FEE_BP) / BP_DENOM;
         uint256 mintUsd = usdAmount - creatorCut - daoCut - lpCut;
 
-        // The whole deposit backs the token; every share below is minted as tokens at the live
-        // rate (the rate does not move between these buys, so they all price the same).
+        require(usdToken.transfer(creatorFeeAddress, creatorCut), "Creator USDT transfer failed");
+        DAO_Amount += daoCut;
+        // 81% backs locked user tokens; the other 9% increases the reserve without minting.
+        // The DAO's 5% stays here as USDT until an eligible distribution.
         require(
-            usdToken.transfer(address(token), usdAmount),
+            usdToken.transfer(address(token), mintUsd + lpCut),
             "Mint funding transfer failed"
         );
-        uint256 locked = token.pricedBuy(mintUsd, address(this)); // principal, locked here
-        DAO_Amount += token.pricedBuy(daoCut, address(this)); // DAO pool, held as tokens
-        token.pricedBuy(creatorCut, creatorFeeAddress); // creator's 5%, as tokens
-        token.pricedBuy(lpCut, address(token)); // liquidity share, sent back to the token contract
+        uint256 releaseTokens = _toTokenAmount(usdAmount); // rate before this stake moves it
+        token.pricedBuy(mintUsd, address(this)); // locked here
+        token.creditReserve(lpCut);
 
         allStake++;
-        stakeInfos[allStake] = Order(msg.sender, usdAmount, locked, block.timestamp, false);
+        stakeInfos[allStake] = Order(msg.sender, usdAmount, releaseTokens, block.timestamp, false);
         u.stakeOrders.push(allStake);
         u.lastStake = usdAmount;
         u.selfBusiness += usdAmount;
@@ -544,17 +541,19 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         withdrawnToday[user] += usdValue;
     }
 
-    // Returns principal tokens + ROI (only the ROI is minted); a 10% cut (5% creator, 5% spot
-    // pool) is taken from the whole payout.
-    // Exempt from MIN_WITHDRAW (a $10 package locks ~$8.10 of tokens).
+    // Pays releaseTokens (100% of the package) from this contract's balance, plus ROI on the
+    // same base (only the ROI is minted). A 10% cut (5% creator, 5% spot pool) applies to the
+    // ROI only, not the principal. Exempt from MIN_WITHDRAW.
+    // Requires a newer stake (recycle) before an order can be released.
     function claimOrder(uint256 orderId) external nonReentrant {
         Order storage o = stakeInfos[orderId];
         require(o.ownerAddress == msg.sender, "Not your order");
         require(!o.claimed, "Already claimed");
         require(block.timestamp >= o.startTime + MATURITY_PERIOD, "Order not mature");
+        uint256[] storage orders = userInfos[msg.sender].stakeOrders;
+        require(orders[orders.length - 1] > orderId, "Recycle required: buy next package first");
 
-        // Cap room is read while this order still counts as unclaimed.
-        uint256 roi = _clampToCapRoom(msg.sender, (o.lockedTokens * ROI_BP) / BP_DENOM);
+        uint256 roi = _clampToCapRoom(msg.sender, (o.releaseTokens * ROI_BP) / BP_DENOM);
         bonusInfos[msg.sender].roiGains += roi;
         bonusInfos[msg.sender].roiClaimed += roi;
         if (roi > 0) {
@@ -563,13 +562,12 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         }
         o.claimed = true;
 
-        // Only the ROI is newly minted (to this contract). The 5% creator and 5% spot cuts are
-        // taken from the whole payout (principal + ROI); the spot cut stays here as real tokens.
+        // Only the ROI is newly minted; principal comes from this contract's existing balance.
         if (roi > 0) token.mintTo(address(this), roi);
-        uint256 total = o.lockedTokens + roi;
-        uint256 creatorCut = (total * WITHDRAW_CREATOR_BP) / BP_DENOM;
-        uint256 spotCut = (total * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
-        uint256 net = total - creatorCut - spotCut;
+        // 10% cut on the ROI only: 5% creator, 5% daily spot bonus pool.
+        uint256 creatorCut = (roi * WITHDRAW_CREATOR_BP) / BP_DENOM;
+        uint256 spotCut = (roi * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
+        uint256 net = o.releaseTokens + roi - creatorCut - spotCut;
         dailySpotBonusPool += spotCut;
         require(token.transfer(creatorFeeAddress, creatorCut), "Creator transfer failed");
         require(token.transfer(msg.sender, net), "Payout transfer failed");
@@ -577,7 +575,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         _checkDailyCap(msg.sender, _toUsdAmount(net));
         if (roi > 0) _distributeLevelIncome(msg.sender, roi);
 
-        emit OrderClaimed(msg.sender, orderId, o.lockedTokens, roi);
+        emit OrderClaimed(msg.sender, orderId, o.releaseTokens, roi);
     }
 
     // Highest CTO tier the user qualifies for: direct business OR team matching business.
@@ -637,9 +635,8 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     }
 
     // ponytail: iterates every DAO-qualified user; paginate if that set grows large.
-    // The pool is TOKENS already held by this contract (minted at stake time). Winners' shares
-    // are credited as claimable gains; whatever isn't credited (nobody qualified, cap-clamped
-    // or inactive users) stays in the pool for the next run.
+    // The pool is USDT. Convert at one live rate, mint credited tokens at distribution,
+    // and move their backing into the token reserve. Unallocated USDT carries over.
     function distributeDAO() external onlyOwner nonReentrant {
         require(block.timestamp >= lastDaoDistribution + DAO_DIST_INTERVAL, "Too soon");
 
@@ -649,13 +646,15 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         }
 
         uint256 pool = DAO_Amount;
+        uint256 rate = token.rateInUSDT();
+        uint256 poolTokens = (pool * BASE) / rate;
         uint256 paid;
         if (totalShares > 0 && pool > 0) {
             for (uint256 i; i < daoQualifiedUsers.length; i++) {
                 address u = daoQualifiedUsers[i];
                 uint256 share = userInfos[u].daoShare;
                 if (share == 0 || !_canEarn(u)) continue;
-                uint256 amt = _clampToCapRoom(u, (pool * share) / totalShares);
+                uint256 amt = _clampToCapRoom(u, (poolTokens * share) / totalShares);
                 if (amt > 0) {
                     bonusInfos[u].daoGains += amt;
                     paid += amt;
@@ -664,8 +663,15 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             }
         }
 
-        emit DaoDistributed(pool, totalShares);
-        DAO_Amount = pool - paid;
+        // Round backing up by at most one base unit so every credited token is funded.
+        uint256 paidUsd = paid == 0 ? 0 : (paid * rate + BASE - 1) / BASE;
+        if (paid > 0) {
+            require(usdToken.transfer(address(token), paidUsd), "DAO funding transfer failed");
+            token.creditReserve(paidUsd);
+            token.mintTo(address(this), paid);
+        }
+        emit DaoDistributed(poolTokens, totalShares);
+        DAO_Amount = pool - paidUsd;
         lastDaoDistribution = block.timestamp;
     }
 
@@ -734,7 +740,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         lastSpotBonusDistribution = block.timestamp;
     }
 
-    // Order details for the UI; lockedTokens is deliberately not exposed here.
+    // Order details for the UI; releaseTokens is deliberately not exposed here.
     function getOrder(
         uint256 orderId
     )

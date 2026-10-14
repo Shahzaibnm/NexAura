@@ -9,7 +9,14 @@ describe("NEXAURA — end-to-end integration", function () {
     const usdt = await MockUSDT.deploy();
 
     const NexauraToken = await ethers.getContractFactory("NexauraToken");
-    const token = await NexauraToken.deploy(owner.address, await usdt.getAddress(), "Nexaura", "NXA");
+    const token = await NexauraToken.deploy(
+      owner.address,
+      await usdt.getAddress(),
+      "Nexaura",
+      "NXA",
+      treasury.address, // doubles as LP address; this scenario doesn't exercise the fee-split specifics
+      owner.address // doubles as reserve address
+    );
 
     const NexauraStaking = await ethers.getContractFactory("NexauraStaking");
     const staking = await NexauraStaking.deploy(
@@ -49,20 +56,18 @@ describe("NEXAURA — end-to-end integration", function () {
     // bp[1]=300 (3%) of dave's 90-token mint = 2.7.
     expect(aliceBonus.levelGains).to.equal(ethers.parseEther("2.7"));
 
-    // 3. Working income is claimable for alice now (2+ directs): referralGains(9) +
-    // levelGains(2.7) = 11.7, well under her 3x cap (lastStake 100 * 3 = 300).
-    const claimable = await staking.claimableWorking(alice.address);
+    // 3. One combined cap covers all income types: referralGains(9) + levelGains(2.7) = 11.7,
+    // well under her 3x cap (cumulativeStaked 100 * 3 = 300).
+    const claimable = await staking.claimable(alice.address);
     expect(claimable).to.equal(ethers.parseEther("11.7"));
 
-    // 4. Daily reward accrues and is claimable as non-working income.
+    // 4. Daily reward accrues into the same combined ledger.
     await ethers.provider.send("evm_increaseTime", [24 * 60 * 60]);
     await ethers.provider.send("evm_mine");
     await staking.connect(alice).claimDailyReward();
-    expect(await staking.claimableNonWorking(alice.address)).to.equal(ethers.parseEther("1.25"));
+    expect(await staking.claimable(alice.address)).to.equal(ethers.parseEther("12.95")); // 11.7 + 1.25 growth
 
-    // 5. Alice withdraws $10 — her non-working claimable alone (1.25) is below MIN_WITHDRAW
-    // ($10), so this draws 1.25 from non-working and the remaining 8.75 from her working
-    // balance (referral + level income from bob/carol/dave's stakes, well above 8.75).
+    // 5. Alice withdraws $10 out of her 12.95 combined claimable balance.
     const beforeAlice = await usdt.balanceOf(alice.address);
     await staking.connect(alice).withdraw(ethers.parseEther("10"));
     const afterAlice = await usdt.balanceOf(alice.address);

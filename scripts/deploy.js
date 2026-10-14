@@ -23,20 +23,25 @@ async function main() {
   // Give the deployer some test USDT to play with in the frontend.
   await (await usdt.mint(deployer.address, hre.ethers.parseEther("100000"))).wait();
 
+  // ponytail: fee/treasury/LP/reserve addresses default to the deployer for a basic testnet
+  // deploy. Production deployment should use separate, dedicated addresses (ideally multisigs).
   const NexauraToken = await hre.ethers.getContractFactory("NexauraToken");
-  const token = await NexauraToken.deploy(deployer.address, usdtAddress, "Nexaura", "NXA");
+  const token = await NexauraToken.deploy(
+    deployer.address,
+    usdtAddress,
+    "Nexaura",
+    "NXA",
+    deployer.address, // liquidityPoolAddress
+    deployer.address // reservePoolAddress
+  );
   await token.waitForDeployment();
   const tokenAddress = await token.getAddress();
   console.log("NexauraToken deployed:", tokenAddress);
-
-  // ponytail: fee/treasury addresses default to the deployer for a basic testnet deploy.
-  // Production deployment should use separate, dedicated addresses (ideally multisigs).
   const NexauraStaking = await hre.ethers.getContractFactory("NexauraStaking");
   const staking = await NexauraStaking.deploy(
     deployer.address,
     usdtAddress,
-    deployer.address, // creatorFeeAddress
-    deployer.address // treasuryAddress
+    deployer.address // creatorFeeAddress
   );
   await staking.waitForDeployment();
   const stakingAddress = await staking.getAddress();

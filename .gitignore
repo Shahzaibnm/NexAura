@@ -7,3 +7,7 @@ cache/
 deployments/
 frontend/node_modules/
 frontend/dist/
+
+# V1 — not published
+NexauraToken.*
+NexauraStaking.*
