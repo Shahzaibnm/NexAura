@@ -482,20 +482,19 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         return true;
     }
 
-    function levelIncomeBp() public pure returns (uint16[20] memory) {
+    function levelIncomeBp() public pure returns (uint16[21] memory) {
         return [
-            300, 150, 150, 100, 100, 50, 50, 50, 25, 25,
+            500, 300, 150, 150, 100, 100, 50, 50, 50, 25, 25,
             25, 15, 15, 15, 15, 15, 25, 25, 50, 100
         ];
     }
 
-    // Pays levels 2-21 as a % of the ROI the claimer just collected (tokens).
+    // Pays levels 1-21 (level 1 = first upline, 5%), as a % of the ROI the claimer just collected (tokens).
     function _distributeLevelIncome(address claimer, uint256 roiTokens) internal {
-        uint16[20] memory bp = levelIncomeBp();
-        // Start at the 2nd ancestor -- the immediate referral already got Direct Income.
-        address upline = userInfos[userInfos[claimer].referral].referral;
+        uint16[21] memory bp = levelIncomeBp();
+        address upline = userInfos[claimer].referral;
 
-        for (uint256 i; i < 20 && upline != address(0); i++) {
+        for (uint256 i; i < 21 && upline != address(0); i++) {
             if (
                 userInfos[upline].lastStake >= MIN_PACKAGE_FOR_LEVEL_INCOME &&
                 _canEarn(upline)
