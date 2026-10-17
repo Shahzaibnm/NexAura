@@ -9,6 +9,7 @@ interface INexauraToken {
     function mintTo(address to, uint256 amount) external;
     function creditReserve(uint256 usdAmount) external;
     function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
 
 interface IUSDLike {
@@ -106,13 +107,15 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     uint256 public constant ONE_DAY = 1 minutes;
     uint256 public constant MATURITY_PERIOD = 10 minutes;
     uint256 public constant GRACE_PERIOD = 7 minutes;
+    uint256 public constant RANK_DAY = MATURITY_PERIOD / 10; // one "day" of rank income
+    uint256 public constant RANK_DAILY_BP = 125; // 1.25% of the tier's match amount, per day
 
     uint256 public constant WORKING_CAP_MULT = 3;
     uint256 public constant NONWORKING_CAP_MULT = 2;
     uint256 public constant MIN_DIRECTS_FOR_WORKING = 2;
 
     uint256 public constant SPOTBONUS_MIN_PACKAGE = 50 * BASE;
-    uint256 public constant SPOTBONUS_DIST_INTERVAL = 1 minutes;
+    uint256 public constant SPOTBONUS_BP = 500; // 5% of each qualifying direct's stake
     uint256 public constant DAO_DIST_INTERVAL = 7 minutes;
     uint256 public constant CTO_DIST_INTERVAL = 30 minutes;
 
@@ -126,8 +129,8 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     uint256 public dailySpotBonusPool; // TOKENS, fed by the 5% claim cut
     uint256 public monthVolumeUsd; // stake volume since the last CTO run
     uint256 public ctoRunId;
-    uint256 public lastSpotBonusDistribution;
     uint256 public lastDaoDistribution;
+    mapping(address => uint256) public capUsedUsd; // USD value of income credited, at credit time
     uint256 public lastCtoDistribution;
 
     mapping(address => uint256) public lastWithdrawDay;
@@ -144,16 +147,16 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256[] directJoinTimes;
         uint256 directBusiness; // USD
         uint256 totalTeamBusiness; // USD
-        uint8 rank; // 0 = none, 1-11
+        uint8 rank; // 0 = none, 1-8
         uint256 daoJoinTime;
         uint256 daoShare;
-        uint256 lastRankPay;
+        uint256 lastRankPay; // rank income accrued up to this time
+        uint256 spotCheckpoint; // time of the join that last triggered a spot bonus
     }
 
     struct Order {
         address ownerAddress;
         uint256 usdAmount;
-        uint256 releaseTokens; // 100% of the package in tokens at the stake-time rate
         uint256 startTime;
         bool claimed;
     }
@@ -218,7 +221,6 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     // incomeType: 1 Direct, 2 Level, 3 ROI, 4 Rank, 5 CTO, 6 Spot Bonus, 7 DAO
     event RankUpdated(address indexed user, uint8 newRank);
     event DaoShareUpdated(address indexed user, uint256 newShare);
-    event SpotBonusDistributed(uint256 pool, uint256 qualifiedCount);
     event DaoDistributed(uint256 pool, uint256 totalShares);
     event CtoDistributed(uint256 revenueUsd, uint256 core1, uint256 core2, uint256 core3);
     event Withdrawn(
@@ -243,17 +245,14 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         userInfos[_owner].lastStake = MAX_PACKAGE;
         userInfos[_owner].daoJoinTime = block.timestamp;
 
-        rankTiers[0] = RankTier(50 * BASE, 3, 2500 * BASE, 400); // Silver
-        rankTiers[1] = RankTier(100 * BASE, 6, 5000 * BASE, 600); // Gold
-        rankTiers[2] = RankTier(200 * BASE, 9, 7500 * BASE, 800); // Pearl
-        rankTiers[3] = RankTier(300 * BASE, 12, 10000 * BASE, 1000); // Platinum
-        rankTiers[4] = RankTier(500 * BASE, 15, 25000 * BASE, 1200); // Sapphire
-        rankTiers[5] = RankTier(700 * BASE, 18, 50000 * BASE, 1400); // Ruby
-        rankTiers[6] = RankTier(900 * BASE, 25, 100000 * BASE, 1600); // Emerald
-        rankTiers[7] = RankTier(1200 * BASE, 30, 250000 * BASE, 1800); // Diamond
-        rankTiers[8] = RankTier(2500 * BASE, 35, 500000 * BASE, 2000); // Black Diamond
-        rankTiers[9] = RankTier(5000 * BASE, 40, 1000000 * BASE, 2500); // Crown Diamond
-        rankTiers[10] = RankTier(10000 * BASE, 60, 2500000 * BASE, 2800); // Kohinoor Diamond
+        rankTiers[0] = RankTier(50 * BASE, 3, 2500 * BASE, 400); // Starter
+        rankTiers[1] = RankTier(100 * BASE, 6, 5000 * BASE, 600); // Booster
+        rankTiers[2] = RankTier(200 * BASE, 9, 7500 * BASE, 800); // Builder
+        rankTiers[3] = RankTier(300 * BASE, 12, 10000 * BASE, 1000); // Accelerator
+        rankTiers[4] = RankTier(500 * BASE, 15, 25000 * BASE, 1200); // Multiplier
+        rankTiers[5] = RankTier(700 * BASE, 18, 50000 * BASE, 1400); // Elite
+        rankTiers[6] = RankTier(900 * BASE, 21, 100000 * BASE, 1500); // Legend
+        rankTiers[7] = RankTier(1200 * BASE, 25, 200000 * BASE, 2000); // Legend Prime
 
         daoTiers[0] = DaoTier(500 * BASE, 1000 * BASE, 1, 10 days);
         daoTiers[1] = DaoTier(1000 * BASE, 2000 * BASE, 2, 20 days);
@@ -263,7 +262,6 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         ctoTiers[1] = CtoTier(10000 * BASE, 20000 * BASE, 100);
         ctoTiers[2] = CtoTier(20000 * BASE, 40000 * BASE, 100);
 
-        lastSpotBonusDistribution = block.timestamp;
         lastDaoDistribution = block.timestamp;
         lastCtoDistribution = block.timestamp;
     }
@@ -335,16 +333,22 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         }
     }
 
+    // Rank needs: current package >= self, enough directs, and a match -- the strongest leg and
+    // all other legs together each >= half of the tier's amount. Ranks only go up.
     function _updateRank(address user) internal {
         UserInfo storage u = userInfos[user];
-        uint256 combined = u.directBusiness + u.totalTeamBusiness;
-        for (uint256 t = 11; t > u.rank; t--) {
+        (, uint256 strong) = getStrongestLeg(user);
+        uint256 others = _legsTotal(user) - strong;
+        for (uint256 t = 8; t > u.rank; t--) {
             RankTier storage tier = rankTiers[t - 1];
             if (
-                u.selfBusiness >= tier.selfStake &&
+                u.lastStake >= tier.selfStake &&
                 u.directs.length >= tier.directsCount &&
-                combined >= tier.teamBusiness
+                strong >= tier.teamBusiness / 2 &&
+                others >= tier.teamBusiness / 2
             ) {
+                if (u.rank > 0) _settleRankIncome(user); // pay days earned at the old rank
+                else u.lastRankPay = block.timestamp; // income starts from the first rank
                 u.rank = uint8(t);
                 emit RankUpdated(user, uint8(t));
                 break;
@@ -361,14 +365,14 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             stakeInfos[orders[orders.length - 1]].startTime + MATURITY_PERIOD + GRACE_PERIOD;
     }
 
-    // Cap is always based on the user's last stake.
+    // Cap (USD) is always based on the user's last stake.
     function _capOf(address user) internal view returns (uint256) {
         uint256[] storage orders = userInfos[user].stakeOrders;
         if (orders.length == 0) return 0;
         uint256 mult = userInfos[user].directs.length >= MIN_DIRECTS_FOR_WORKING
             ? WORKING_CAP_MULT
             : NONWORKING_CAP_MULT;
-        return stakeInfos[orders[orders.length - 1]].releaseTokens * mult;
+        return stakeInfos[orders[orders.length - 1]].usdAmount * mult;
     }
 
     function _totalGains(address user) internal view returns (uint256) {
@@ -395,19 +399,40 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             b.daoClaimed;
     }
 
+    // USD left under the cap.
     function _capRoom(address user) internal view returns (uint256) {
-        uint256 total = _totalGains(user);
+        uint256 used = capUsedUsd[user];
         uint256 cap = _capOf(user);
-        return total >= cap ? 0 : cap - total;
+        return used >= cap ? 0 : cap - used;
     }
 
-    function _clampToCapRoom(address user, uint256 amount) internal view returns (uint256) {
-        uint256 room = _capRoom(user);
-        return amount > room ? room : amount;
+    // Cuts a token income to the USD room left under the cap and records its USD value (at the
+    // live rate now) as used. Every caller credits the returned amount right after.
+    function _clampToCapRoom(address user, uint256 amount) internal returns (uint256) {
+        uint256 roomUsd = _capRoom(user);
+        uint256 usd = _toUsdAmount(amount);
+        if (usd > roomUsd) {
+            amount = _toTokenAmount(roomUsd);
+            usd = roomUsd;
+        }
+        capUsedUsd[user] += usd;
+        return amount;
     }
 
     function _toTokenAmount(uint256 usdAmount) internal view returns (uint256) {
         return (usdAmount * BASE) / token.rateInUSDT();
+    }
+
+    // If this contract holds fewer tokens than a payout needs, pull the shortfall from the
+    // reserve pool (the owner must have approved this contract as a spender there). Transfers
+    // into this contract are burn-exempt in the token, so the full shortfall arrives.
+    function _ensureTokens(uint256 needed) internal {
+        uint256 bal = token.balanceOf(address(this));
+        if (bal >= needed) return;
+        require(
+            token.transferFrom(token.reservePoolAddress(), address(this), needed - bal),
+            "Reserve top-up failed"
+        );
     }
 
     function _toUsdAmount(uint256 tokenAmount) internal view returns (uint256) {
@@ -445,12 +470,12 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             usdToken.transfer(address(token), mintUsd + lpCut),
             "Mint funding transfer failed"
         );
-        uint256 releaseTokens = _toTokenAmount(usdAmount); // rate before this stake moves it
         token.pricedBuy(mintUsd, address(this)); // locked here
         token.creditReserve(lpCut);
 
+        _settleRankIncome(msg.sender); // days earned under the previous order, before it is replaced
         allStake++;
-        stakeInfos[allStake] = Order(msg.sender, usdAmount, releaseTokens, block.timestamp, false);
+        stakeInfos[allStake] = Order(msg.sender, usdAmount, block.timestamp, false);
         u.stakeOrders.push(allStake);
         u.lastStake = usdAmount;
         u.selfBusiness += usdAmount;
@@ -460,6 +485,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         if (isFirstStake && upline != address(0)) {
             userInfos[upline].directs.push(msg.sender);
             userInfos[upline].directJoinTimes.push(block.timestamp);
+            _spotBonusOnJoin(upline, msg.sender);
         }
 
         // Direct income: 5% of the new deposit only (first stake in full, a same-size recycle
@@ -509,22 +535,31 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         }
     }
 
-    // Rank income for the claimer's own cycle: 12.5% x combined business (USD) x incentive %.
-    // At most once per 10 days so several orders claimed together don't pay it repeatedly.
-    function _payRankIncome(address user) internal {
+    // Daily rank income: 1.25% x the tier's match amount x the tier's incentive %, per full day,
+    // as tokens at the live rate. Days stop counting 17 days (10 + 7 grace) after the newest
+    // order; the cursor then jumps to now so a later restake never pays the gap.
+    function _settleRankIncome(address user) internal {
         UserInfo storage u = userInfos[user];
-        if (u.rank == 0 || !_canEarn(user)) return;
-        if (block.timestamp < u.lastRankPay + MATURITY_PERIOD) return;
+        uint256[] storage orders = u.stakeOrders;
+        if (u.rank == 0 || orders.length == 0) return;
 
-        uint256 combinedUsd = u.directBusiness + u.totalTeamBusiness;
-        uint256 rankUsd = (((combinedUsd * ROI_BP) / BP_DENOM) *
-            rankTiers[u.rank - 1].incentiveBp) / BP_DENOM;
-        uint256 amt = _clampToCapRoom(user, _toTokenAmount(rankUsd));
-        u.lastRankPay = block.timestamp;
-        if (amt > 0) {
-            bonusInfos[user].teamGrowthGains += amt;
-            emit IncomeCredited(user, user, amt, 4);
+        uint256 end = stakeInfos[orders[orders.length - 1]].startTime + MATURITY_PERIOD + GRACE_PERIOD;
+        uint256 to = block.timestamp < end ? block.timestamp : end;
+        if (to > u.lastRankPay) {
+            uint256 days_ = (to - u.lastRankPay) / RANK_DAY;
+            if (days_ > 0) {
+                u.lastRankPay += days_ * RANK_DAY;
+                RankTier storage tier = rankTiers[u.rank - 1];
+                uint256 dailyUsd = (((tier.teamBusiness * RANK_DAILY_BP) / BP_DENOM) *
+                    tier.incentiveBp) / BP_DENOM;
+                uint256 amt = _clampToCapRoom(user, _toTokenAmount(dailyUsd * days_));
+                if (amt > 0) {
+                    bonusInfos[user].teamGrowthGains += amt;
+                    emit IncomeCredited(user, user, amt, 4);
+                }
+            }
         }
+        if (block.timestamp >= end) u.lastRankPay = block.timestamp;
     }
 
     function _checkDailyCap(address user, uint256 usdValue) internal {
@@ -540,8 +575,8 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         withdrawnToday[user] += usdValue;
     }
 
-    // Pays releaseTokens (100% of the package) from this contract's balance, plus ROI on the
-    // same base (only the ROI is minted). A 10% cut (5% creator, 5% spot pool) applies to the
+    // Converts the order's USD amount to tokens at the current price and pays that principal
+    // plus ROI on it, both from this contract's balance (nothing is minted). A 10% cut (5% creator, 5% spot pool) applies to the
     // ROI only, not the principal. Exempt from MIN_WITHDRAW.
     // Requires a newer stake (recycle) before an order can be released.
     function claimOrder(uint256 orderId) external nonReentrant {
@@ -552,29 +587,28 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256[] storage orders = userInfos[msg.sender].stakeOrders;
         require(orders[orders.length - 1] > orderId, "Recycle required: buy next package first");
 
-        uint256 roi = _clampToCapRoom(msg.sender, (o.releaseTokens * ROI_BP) / BP_DENOM);
+        uint256 principal = _toTokenAmount(o.usdAmount);
+        uint256 roi = _clampToCapRoom(msg.sender, (principal * ROI_BP) / BP_DENOM);
         bonusInfos[msg.sender].roiGains += roi;
         bonusInfos[msg.sender].roiClaimed += roi;
         if (roi > 0) {
             emit IncomeCredited(msg.sender, msg.sender, roi, 3);
-            _payRankIncome(msg.sender); // before the order is marked claimed, so the cap still has room
         }
         o.claimed = true;
 
-        // Only the ROI is newly minted; principal comes from this contract's existing balance.
-        if (roi > 0) token.mintTo(address(this), roi);
         // 10% cut on the ROI only: 5% creator, 5% daily spot bonus pool.
         uint256 creatorCut = (roi * WITHDRAW_CREATOR_BP) / BP_DENOM;
         uint256 spotCut = (roi * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
-        uint256 net = o.releaseTokens + roi - creatorCut - spotCut;
+        uint256 net = principal + roi - creatorCut - spotCut;
         dailySpotBonusPool += spotCut;
+        _ensureTokens(creatorCut + net);
         require(token.transfer(creatorFeeAddress, creatorCut), "Creator transfer failed");
         require(token.transfer(msg.sender, net), "Payout transfer failed");
 
         _checkDailyCap(msg.sender, _toUsdAmount(net));
         if (roi > 0) _distributeLevelIncome(msg.sender, roi);
 
-        emit OrderClaimed(msg.sender, orderId, o.releaseTokens, roi);
+        emit OrderClaimed(msg.sender, orderId, principal, roi);
     }
 
     // Highest CTO tier the user qualifies for: direct business OR team matching business.
@@ -674,72 +708,39 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         lastDaoDistribution = block.timestamp;
     }
 
-    // 2+ directs whose OWN first stake landed within the last 24h, each at $50+. Looks back at
-    // most 20 of the most recent directs (directJoinTimes is appended in chronological order, so
-    // once an entry is older than 24h everything before it is too -- safe to stop there).
-    function qualifiesForSpotBonus(address user) public view returns (bool) {
-        UserInfo storage u = userInfos[user];
-        uint256[] storage times = u.directJoinTimes;
-        address[] storage directs = u.directs;
-        uint256 len = times.length;
-        uint256 count;
+    // Spot bonus, checked on every direct join: when the newest direct ($50+) is the upline's
+    // 2nd $50+ join within 24h, pay 5% of both stakes (tokens at the live rate). A 3rd+ join in
+    // the same window pays nothing; after a payout nothing counts until 24h have passed and
+    // joins already paid are never reused. Funded by the 5% spot cut taken on withdrawals.
+    function _spotBonusOnJoin(address upline, address joiner) internal {
+        UserInfo storage up = userInfos[upline];
+        if (block.timestamp - up.spotCheckpoint <= 1 days) return;
+        uint256 usd = userInfos[joiner].lastStake;
+        if (usd < SPOTBONUS_MIN_PACKAGE) return;
 
-        for (uint256 i = len; i > 0 && (len - i) < 20; i--) {
-            if (block.timestamp - times[i - 1] > 1 days) break;
-            if (userInfos[directs[i - 1]].lastStake >= SPOTBONUS_MIN_PACKAGE) {
-                count++;
-                if (count >= 2) return true;
+        uint256 count = 1;
+        uint256 n = up.directs.length;
+        for (uint256 i = n - 1; i > 0; i--) {
+            uint256 t = up.directJoinTimes[i - 1];
+            if (t <= up.spotCheckpoint || block.timestamp - t > 1 days) break;
+            uint256 other = userInfos[up.directs[i - 1]].lastStake;
+            if (other >= SPOTBONUS_MIN_PACKAGE) {
+                usd += other;
+                if (++count > 2) return;
             }
         }
-        return false;
+        if (count != 2 || !_canEarn(upline)) return;
+
+        up.spotCheckpoint = block.timestamp;
+        uint256 amt = _clampToCapRoom(upline, _toTokenAmount((usd * SPOTBONUS_BP) / BP_DENOM));
+        if (amt > 0) {
+            bonusInfos[upline].spotBonusGains += amt;
+            dailySpotBonusPool = dailySpotBonusPool > amt ? dailySpotBonusPool - amt : 0;
+            emit IncomeCredited(joiner, upline, amt, 6);
+        }
     }
 
-    // ponytail: iterates only the caller-supplied candidate list; the owner (or an indexer)
-    // supplies today's plausible qualifiers. The pool is in tokens and only resets when someone
-    // qualified, so an empty day does not burn it. Duplicate addresses are paid once.
-    function distributeSpotBonus(
-        address[] calldata candidates
-    ) external onlyOwner nonReentrant {
-        require(
-            block.timestamp >= lastSpotBonusDistribution + SPOTBONUS_DIST_INTERVAL,
-            "Too soon"
-        );
-
-        bool[] memory pay = new bool[](candidates.length);
-        uint256 qualifiedCount;
-        for (uint256 i; i < candidates.length; i++) {
-            bool dup;
-            for (uint256 j; j < i; j++) {
-                if (candidates[j] == candidates[i]) {
-                    dup = true;
-                    break;
-                }
-            }
-            if (!dup && qualifiesForSpotBonus(candidates[i]) && _canEarn(candidates[i])) {
-                pay[i] = true;
-                qualifiedCount++;
-            }
-        }
-
-        uint256 pool = dailySpotBonusPool;
-        if (qualifiedCount > 0 && pool > 0) {
-            uint256 share = pool / qualifiedCount;
-            for (uint256 i; i < candidates.length; i++) {
-                if (!pay[i]) continue;
-                uint256 amt = _clampToCapRoom(candidates[i], share);
-                if (amt > 0) {
-                    bonusInfos[candidates[i]].spotBonusGains += amt;
-                    emit IncomeCredited(candidates[i], candidates[i], amt, 6);
-                }
-            }
-            dailySpotBonusPool = 0;
-        }
-
-        emit SpotBonusDistributed(pool, qualifiedCount);
-        lastSpotBonusDistribution = block.timestamp;
-    }
-
-    // Order details for the UI; releaseTokens is deliberately not exposed here.
+    // Order details for the UI.
     function getOrder(
         uint256 orderId
     )
@@ -749,6 +750,58 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     {
         Order storage o = stakeInfos[orderId];
         return (o.ownerAddress, o.usdAmount, o.startTime, o.claimed);
+    }
+
+    // A leg is one direct referral; its business (USD) is that direct's own stakes plus
+    // everything below them.
+    function _legBusiness(address leg) internal view returns (uint256) {
+        UserInfo storage l = userInfos[leg];
+        return l.selfBusiness + l.directBusiness + l.totalTeamBusiness;
+    }
+
+    function _legsTotal(address user) internal view returns (uint256 total) {
+        address[] storage directs = userInfos[user].directs;
+        for (uint256 i; i < directs.length; i++) total += _legBusiness(directs[i]);
+    }
+
+    // Direct with the largest business (USD) and that business.
+    function getStrongestLeg(
+        address user
+    ) public view returns (address strongestLeg, uint256 strongestBusiness) {
+        address[] storage directs = userInfos[user].directs;
+        for (uint256 i; i < directs.length; i++) {
+            uint256 b = _legBusiness(directs[i]);
+            if (b > strongestBusiness) {
+                strongestBusiness = b;
+                strongestLeg = directs[i];
+            }
+        }
+    }
+
+    // Total business (USD) of all legs except the strongest.
+    function getTeamsExcludingStrongest(address user) public view returns (uint256) {
+        (, uint256 strong) = getStrongestLeg(user);
+        return _legsTotal(user) - strong;
+    }
+
+    // Per-user package serials: index 0 is the user's first package, 1 the second, and so on.
+    function getUserOrderCount(address user) external view returns (uint256) {
+        return userInfos[user].stakeOrders.length;
+    }
+
+    function getUserOrder(
+        address user,
+        uint256 index
+    )
+        external
+        view
+        returns (uint256 orderId, uint256 usdAmount, uint256 startTime, bool claimed)
+    {
+        uint256[] storage orders = userInfos[user].stakeOrders;
+        require(index < orders.length, "Invalid serial");
+        orderId = orders[index];
+        Order storage o = stakeInfos[orderId];
+        return (orderId, o.usdAmount, o.startTime, o.claimed);
     }
 
     function capOf(address user) external view returns (uint256) {
@@ -804,25 +857,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         return _claimableOfType(u, b.daoGains, b.daoClaimed);
     }
 
-    // Mints the net amount to the user; 5% creator is minted, 5% is minted into this contract
-    // as the spot-bonus pool.
-    function _claimIncome(address user, uint256 amount, uint8 gainType) internal {
-        require(amount > 0, "Nothing to claim");
-        uint256 usdValue = _toUsdAmount(amount);
-        require(usdValue >= MIN_WITHDRAW, "Below minimum withdrawal");
-        _checkDailyCap(user, usdValue);
-
-        uint256 creatorCut = (amount * WITHDRAW_CREATOR_BP) / BP_DENOM;
-        uint256 spotCut = (amount * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
-        uint256 net = amount - creatorCut - spotCut;
-        dailySpotBonusPool += spotCut;
-        token.mintTo(creatorFeeAddress, creatorCut);
-        token.mintTo(address(this), spotCut); // spot pool is held as real tokens
-        token.mintTo(user, net);
-        emit Withdrawn(user, amount, net, gainType);
-    }
-
-    // DAO and spot-bonus gains are already-minted tokens held here, so nothing is minted: net
+    // All income claims pay from tokens held by this contract, nothing is minted: net
     // and the creator cut are transferred out (no burn for staking-sourced transfers); the 5%
     // spot cut simply stays held and goes back into the spot pool.
     function _claimFromHeld(address user, uint256 amount, uint8 gainType) internal {
@@ -835,6 +870,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 spotCut = (amount * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
         uint256 net = amount - creatorCut - spotCut;
         dailySpotBonusPool += spotCut;
+        _ensureTokens(creatorCut + net);
         require(token.transfer(creatorFeeAddress, creatorCut), "Creator transfer failed");
         require(token.transfer(user, net), "Withdrawal transfer failed");
         emit Withdrawn(user, amount, net, gainType);
@@ -843,25 +879,27 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     function claimReferralGains() external nonReentrant {
         uint256 amount = claimableReferralGains(msg.sender);
         bonusInfos[msg.sender].referralClaimed += amount;
-        _claimIncome(msg.sender, amount, 1);
+        _claimFromHeld(msg.sender, amount, 1);
     }
 
     function claimLevelGains() external nonReentrant {
         uint256 amount = claimableLevelGains(msg.sender);
         bonusInfos[msg.sender].levelClaimed += amount;
-        _claimIncome(msg.sender, amount, 2);
+        _claimFromHeld(msg.sender, amount, 2);
     }
 
+    // Rank income: credits the days earned so far, then claims the whole balance.
     function claimTeamGrowthGains() external nonReentrant {
+        _settleRankIncome(msg.sender);
         uint256 amount = claimableTeamGrowthGains(msg.sender);
         bonusInfos[msg.sender].teamGrowthClaimed += amount;
-        _claimIncome(msg.sender, amount, 4);
+        _claimFromHeld(msg.sender, amount, 4);
     }
 
     function claimCtoGains() external nonReentrant {
         uint256 amount = claimableCtoGains(msg.sender);
         bonusInfos[msg.sender].ctoClaimed += amount;
-        _claimIncome(msg.sender, amount, 5);
+        _claimFromHeld(msg.sender, amount, 5);
     }
 
     function claimSpotBonusGains() external nonReentrant {

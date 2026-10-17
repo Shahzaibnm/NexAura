@@ -169,7 +169,7 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         uint256 senderBalance = _balances[sender];
         require(senderBalance >= amount, "NexauraToken: transfer amount exceeds balance");
 
-        uint256 burnAmount = sender == stakingContract
+        uint256 burnAmount = (sender == stakingContract || recipient == stakingContract)
             ? 0
             : (amount * TRANSFER_BURN_BP) / BP_DENOM;
         uint256 sendAmount = amount - burnAmount;
