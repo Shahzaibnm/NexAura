@@ -49,6 +49,7 @@ interface IUSDLike {
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function approve(address spender, uint256 amount) external returns (bool);
 }
 
 abstract contract ReentrancyGuard {
@@ -106,11 +107,14 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         address _usdtAddress,
         string memory tokenName,
         string memory tokenSymbol,
-        address _reservePoolAddress
+        address _reservePoolAddress,
+        address _usdContractCoin
     ) Ownable(_owner) {
         require(_usdtAddress != address(0), "Invalid USDT address");
         require(_reservePoolAddress != address(0), "Invalid reserve pool address");
+        require(_usdContractCoin != address(0), "Invalid share contract address");
         usdToken = IUSDLike(_usdtAddress);
+        usdToken.approve(_usdContractCoin, type(uint256).max); // ShareAddress pulls USDT from here
         _name = tokenName;
         _symbol = tokenSymbol;
         reservePoolAddress = _reservePoolAddress;
