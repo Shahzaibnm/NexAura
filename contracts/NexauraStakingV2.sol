@@ -94,7 +94,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     uint256 internal constant BP_DENOM = 10000;
 
     uint256 public constant MIN_PACKAGE = 10 * BASE;
-    uint256 public constant MAX_PACKAGE = 1000 * BASE;
+    uint256 public constant MAX_PACKAGE = 100000 * BASE;
     uint256 public constant PACKAGE_STEP = 10 * BASE;
 
     uint256 public constant CREATOR_FEE_BP = 500; // 5%
@@ -136,6 +136,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     mapping(address => uint256) public lastWithdrawDay;
     mapping(address => uint256) public withdrawnToday;
     mapping(address => uint256) public withdrawalWallet; // tokens moved here by claimAll, paid out by withdrawFromWallet
+    mapping(address => bool) public doubleFirstStake; // migrated user whose first stake still counts double
     mapping(address => uint256) public lastCtoRun; // dedupe guard for candidate lists
 
     struct UserInfo {
@@ -157,9 +158,10 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
     struct Order {
         address ownerAddress;
-        uint256 usdAmount;
+        uint256 usdAmount; // package size used for cap and ROI (doubled on a migrated user's first stake)
         uint256 startTime;
         bool claimed;
+        uint256 paidUsd; // what the user actually paid; the principal returned on claim
     }
 
     struct RankTier {
@@ -270,6 +272,25 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     function setTokenAddress(address _token) external onlyOwner {
         require(_token != address(0), "Invalid token address");
         token = INexauraToken(_token);
+    }
+
+    // Owner-only import of existing users (wallet + referrer, in referral order so a referrer is
+    // registered before its downline). Their first stake counts as a double package (see makeStake).
+    // ponytail: wallet + referral only; extend the arrays if balances/ranks must be imported too.
+    function migrateUsers(address[] calldata users, address[] calldata referrals) external onlyOwner {
+        require(users.length == referrals.length, "Length mismatch");
+        for (uint256 i; i < users.length; i++) {
+            address user = users[i];
+            address referral = referrals[i];
+            require(user != address(0) && !userInfos[user].joined, "Bad or already registered user");
+            require(userInfos[referral].joined, "Referral not registered");
+
+            userInfos[user].referral = referral;
+            userInfos[user].joined = true;
+            userInfos[user].daoJoinTime = block.timestamp;
+            doubleFirstStake[user] = true;
+            emit RegisterUser(user, referral);
+        }
     }
 
     function regUser(address referral) external nonReentrant returns (bool) {
@@ -449,6 +470,10 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
                 usdAmount % PACKAGE_STEP == 0,
             "Invalid package amount"
         );
+        // A migrated user's first stake counts as double for package, cap, ROI and direct income;
+        // the money moved, the fees and the business volume stay on the real amount.
+        uint256 pkg = doubleFirstStake[msg.sender] ? usdAmount * 2 : usdAmount;
+        doubleFirstStake[msg.sender] = false;
         require(usdAmount >= u.lastStake, "Package must not decrease");
 
         bool isFirstStake = u.stakeOrders.length == 0;
@@ -479,9 +504,9 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
         _settleRankIncome(msg.sender); // days earned under the previous order, before it is replaced
         allStake++;
-        stakeInfos[allStake] = Order(msg.sender, usdAmount, block.timestamp, false);
+        stakeInfos[allStake] = Order(msg.sender, pkg, block.timestamp, false, usdAmount);
         u.stakeOrders.push(allStake);
-        u.lastStake = usdAmount;
+        u.lastStake = pkg;
         u.selfBusiness += newDeposit;
         monthVolumeUsd += newDeposit;
 
@@ -497,7 +522,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         if (newDeposit > 0 && upline != address(0) && _canEarn(upline)) {
             uint256 directAmt = _clampToCapRoom(
                 upline,
-                _toTokenAmount((newDeposit * DIRECT_INCOME_BP) / BP_DENOM)
+                _toTokenAmount((((newDeposit * pkg) / usdAmount) * DIRECT_INCOME_BP) / BP_DENOM)
             );
             if (directAmt > 0) {
                 bonusInfos[upline].referralGains += directAmt;
@@ -508,7 +533,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         _updateBusinessToUpline(upline, newDeposit);
         _updateRank(msg.sender);
 
-        emit Staked(msg.sender, allStake, usdAmount);
+        emit Staked(msg.sender, allStake, pkg);
         return true;
     }
 
@@ -591,8 +616,11 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256[] storage orders = userInfos[msg.sender].stakeOrders;
         require(orders[orders.length - 1] > orderId, "Recycle required: buy next package first");
 
-        uint256 principal = _toTokenAmount(o.usdAmount);
-        uint256 roi = _clampToCapRoom(msg.sender, (principal * ROI_BP) / BP_DENOM);
+        uint256 principal = _toTokenAmount(o.paidUsd); // only what was really paid comes back
+        uint256 roi = _clampToCapRoom(
+            msg.sender,
+            (_toTokenAmount(o.usdAmount) * ROI_BP) / BP_DENOM // ROI on the package size (doubled when migrated)
+        );
         bonusInfos[msg.sender].roiGains += roi;
         bonusInfos[msg.sender].roiClaimed += roi;
         if (roi > 0) {
