@@ -135,6 +135,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
     mapping(address => uint256) public lastWithdrawDay;
     mapping(address => uint256) public withdrawnToday;
+    mapping(address => uint256) public withdrawalWallet; // tokens moved here by claimAll, paid out by withdrawFromWallet
     mapping(address => uint256) public lastCtoRun; // dedupe guard for candidate lists
 
     struct UserInfo {
@@ -458,28 +459,31 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         );
 
         uint256 creatorCut = (usdAmount * CREATOR_FEE_BP) / BP_DENOM;
-        uint256 daoCut = (usdAmount * DAO_FEE_BP) / BP_DENOM;
-        uint256 lpCut = (usdAmount * LIQUIDITY_FEE_BP) / BP_DENOM;
-        uint256 mintUsd = usdAmount - creatorCut - daoCut - lpCut;
+        // DAO and reserve cuts apply to new money only; the locked share stays on the full package.
+        uint256 daoCut = (newDeposit * DAO_FEE_BP) / BP_DENOM;
+        uint256 mintUsd = (usdAmount * (BP_DENOM - CREATOR_FEE_BP - DAO_FEE_BP - LIQUIDITY_FEE_BP)) /
+            BP_DENOM;
+        uint256 reserveUsd = usdAmount - creatorCut - daoCut - mintUsd; // 9% of new money + the unallocated rest
 
         require(usdToken.transfer(creatorFeeAddress, creatorCut), "Creator USDT transfer failed");
         DAO_Amount += daoCut;
-        // 81% backs locked user tokens; the other 9% increases the reserve without minting.
-        // The DAO's 5% stays here as USDT until an eligible distribution.
+        // 81% of the package backs locked user tokens; the rest of the non-admin, non-DAO money
+        // (the 9% cut on new money plus whatever recycles don't allocate) increases the reserve
+        // without minting. The DAO's cut stays here as USDT until an eligible distribution.
         require(
-            usdToken.transfer(address(token), mintUsd + lpCut),
+            usdToken.transfer(address(token), mintUsd + reserveUsd),
             "Mint funding transfer failed"
         );
         token.pricedBuy(mintUsd, address(this)); // locked here
-        token.creditReserve(lpCut);
+        token.creditReserve(reserveUsd);
 
         _settleRankIncome(msg.sender); // days earned under the previous order, before it is replaced
         allStake++;
         stakeInfos[allStake] = Order(msg.sender, usdAmount, block.timestamp, false);
         u.stakeOrders.push(allStake);
         u.lastStake = usdAmount;
-        u.selfBusiness += usdAmount;
-        monthVolumeUsd += usdAmount;
+        u.selfBusiness += newDeposit;
+        monthVolumeUsd += newDeposit;
 
         address upline = u.referral;
         if (isFirstStake && upline != address(0)) {
@@ -501,7 +505,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             }
         }
 
-        _updateBusinessToUpline(upline, usdAmount);
+        _updateBusinessToUpline(upline, newDeposit);
         _updateRank(msg.sender);
 
         emit Staked(msg.sender, allStake, usdAmount);
@@ -912,5 +916,44 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 amount = claimableDaoGains(msg.sender);
         bonusInfos[msg.sender].daoClaimed += amount;
         _claimFromHeld(msg.sender, amount, 7);
+    }
+
+    // Moves every claimable income into the withdrawal wallet in one call. Types are taken in
+    // order (referral, level, rank, CTO, spot, DAO); once the claimable room runs out the rest
+    // is skipped, so the wallet only ever receives what is claimable.
+    function claimAll() external nonReentrant {
+        address user = msg.sender;
+        _settleRankIncome(user);
+        BonusInfo storage b = bonusInfos[user];
+        uint256 room = claimable(user);
+        uint256 total;
+        uint256 t;
+
+        t = _min(b.referralGains - b.referralClaimed, room);
+        b.referralClaimed += t; room -= t; total += t;
+        t = _min(b.levelGains - b.levelClaimed, room);
+        b.levelClaimed += t; room -= t; total += t;
+        t = _min(b.teamGrowthGains - b.teamGrowthClaimed, room);
+        b.teamGrowthClaimed += t; room -= t; total += t;
+        t = _min(b.ctoGains - b.ctoClaimed, room);
+        b.ctoClaimed += t; room -= t; total += t;
+        t = _min(b.spotBonusGains - b.spotBonusClaimed, room);
+        b.spotBonusClaimed += t; room -= t; total += t;
+        t = _min(b.daoGains - b.daoClaimed, room);
+        b.daoClaimed += t; total += t;
+
+        require(total > 0, "Nothing to claim");
+        withdrawalWallet[user] += total;
+    }
+
+    // Withdraws from the wallet under the usual rules (minimum, daily cap, creator and spot cuts).
+    function withdrawFromWallet(uint256 amount) external nonReentrant {
+        require(amount > 0 && amount <= withdrawalWallet[msg.sender], "Insufficient wallet balance");
+        withdrawalWallet[msg.sender] -= amount;
+        _claimFromHeld(msg.sender, amount, 8);
+    }
+
+    function _min(uint256 a, uint256 b) private pure returns (uint256) {
+        return a < b ? a : b;
     }
 }

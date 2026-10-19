@@ -83,7 +83,6 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
 
     IUSDLike public usdToken;
     address public stakingContract;
-    address public liquidityPoolAddress;
     address public reservePoolAddress;
 
     // Tracked separately from usdToken.balanceOf(address(this)) so that anyone
@@ -107,16 +106,13 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         address _usdtAddress,
         string memory tokenName,
         string memory tokenSymbol,
-        address _liquidityPoolAddress,
         address _reservePoolAddress
     ) Ownable(_owner) {
         require(_usdtAddress != address(0), "Invalid USDT address");
-        require(_liquidityPoolAddress != address(0), "Invalid liquidity pool address");
         require(_reservePoolAddress != address(0), "Invalid reserve pool address");
         usdToken = IUSDLike(_usdtAddress);
         _name = tokenName;
         _symbol = tokenSymbol;
-        liquidityPoolAddress = _liquidityPoolAddress;
         reservePoolAddress = _reservePoolAddress;
     }
 
