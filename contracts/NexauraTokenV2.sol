@@ -291,6 +291,12 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         require(usdToken.transfer(msg.sender, netUsd), "USDT transfer failed");
     }
 
+    /// @dev Pays income claims in USDT straight from this contract's balance. internalReserve is
+    /// untouched: the income USDT is whatever balance sits above the reserve (e.g. DAO funding).
+    function payUsdt(address to, uint256 amount) external onlyStaking nonReentrant {
+        require(usdToken.transfer(to, amount), "USDT payout failed");
+    }
+
     /// @dev Mints reward tokens (ROI, income, fees) with no USDT behind them, by design.
     function mintTo(address to, uint256 amount) external onlyStaking {
         _mint(to, amount);
