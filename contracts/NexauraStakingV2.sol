@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 interface INexauraToken {
     function balanceOf(address account) external view returns (uint256);
     function rateInUSDT() external view returns (uint256);
-    function reservePoolAddress() external view returns (address);
+    function insurancePoolAddress() external view returns (address);
     function pricedBuy(uint256 usdAmount, address forAddress) external returns (uint256);
     function mintTo(address to, uint256 amount) external;
     function creditReserve(uint256 usdAmount) external;
@@ -116,7 +116,9 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     uint256 public constant MIN_DIRECTS_FOR_WORKING = 2;
 
     uint256 public constant SPOTBONUS_MIN_PACKAGE = 50 * BASE;
-    uint256 public constant SPOTBONUS_BP = 500; // 5% of each qualifying direct's stake
+    uint256 public constant SPOTBONUS_DIST_INTERVAL = 1 days;
+    uint256 public constant SPOT_TIER1_BP = 3000; // 30% of the pool: users with 1 qualifying direct
+    uint256 public constant SPOT_TIER2_BP = 7000; // 70% of the pool: users with 2+ qualifying directs
     uint256 public constant DAO_DIST_INTERVAL = 7 minutes;
     uint256 public constant CTO_DIST_INTERVAL = 30 minutes;
 
@@ -129,6 +131,11 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     uint256 public allStake;
     uint256 public monthVolumeUsd; // stake volume since the last CTO run
     uint256 public ctoRunId;
+    uint256 public dailySpotBonusPool; // USDT value, fed by the 5% claim cut
+    uint256 public lastSpotBonusDistribution;
+    uint256 public spotRunId;
+    mapping(uint256 => address[]) internal spotQueue; // run id => users who qualified during that run
+    mapping(address => uint256) internal spotQueuedIn; // run id + 1 the user was last queued in (0 = never)
     uint256 public lastDaoDistribution;
     mapping(address => uint256) public capUsedUsd; // USD value of income credited, at credit time
     uint256 public lastCtoDistribution;
@@ -153,7 +160,6 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 daoJoinTime;
         uint256 daoShare;
         uint256 lastRankPay; // rank income accrued up to this time
-        uint256 spotCheckpoint; // time of the join that last triggered a spot bonus
     }
 
     struct Order {
@@ -225,6 +231,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     event RankUpdated(address indexed user, uint8 newRank);
     event DaoShareUpdated(address indexed user, uint256 newShare);
     event DaoDistributed(uint256 pool, uint256 totalShares);
+    event SpotBonusDistributed(uint256 pool, uint256 qualifiedCount);
     event CtoDistributed(uint256 revenueUsd, uint256 core1, uint256 core2, uint256 core3);
     event Withdrawn(
         address indexed user,
@@ -454,13 +461,13 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     }
 
     // If this contract holds fewer tokens than a payout needs, pull the shortfall from the
-    // reserve pool (the owner must have approved this contract as a spender there). Transfers
+    // insurance pool (the owner must have approved this contract as a spender there). Transfers
     // into this contract are burn-exempt in the token, so the full shortfall arrives.
     function _ensureTokens(uint256 needed) internal {
         uint256 bal = token.balanceOf(address(this));
         if (bal >= needed) return;
         require(
-            token.transferFrom(token.reservePoolAddress(), address(this), needed - bal),
+            token.transferFrom(token.insurancePoolAddress(), address(this), needed - bal),
             "Reserve top-up failed"
         );
     }
@@ -524,7 +531,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         if (isFirstStake && upline != address(0)) {
             userInfos[upline].directs.push(msg.sender);
             userInfos[upline].directJoinTimes.push(block.timestamp);
-            _spotBonusOnJoin(upline, msg.sender);
+            _queueSpotQualifier(upline, msg.sender);
         }
 
         // Direct income: 5% of the new deposit only (first stake in full, a same-size recycle
@@ -618,7 +625,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
     // Converts the order's USD amount to tokens at the current price and pays that principal
     // plus ROI on it, both from this contract's balance (nothing is minted). A 10% cut (5% creator, 5% spot) applies to the
-    // ROI only, not the principal. Exempt from MIN_WITHDRAW.
+    // ROI only, not the principal. Exempt from MIN_WITHDRAW and the daily withdrawal cap.
     // Requires a newer stake (recycle) before an order can be released.
     function claimOrder(uint256 orderId) external nonReentrant {
         Order storage o = stakeInfos[orderId];
@@ -640,15 +647,15 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         }
         o.claimed = true;
 
-        // 10% cut on the ROI only: 5% creator, 5% spot cut (simply not paid out).
+        // 10% cut on the ROI only: 5% creator, 5% spot cut (feeds the spot pool, not paid out).
         uint256 creatorCut = (roi * WITHDRAW_CREATOR_BP) / BP_DENOM;
         uint256 spotCut = (roi * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
         uint256 net = principal + roi - creatorCut - spotCut;
+        dailySpotBonusPool += _toUsdAmount(spotCut);
         _ensureTokens(creatorCut + net);
         require(token.transfer(creatorFeeAddress, creatorCut), "Creator transfer failed");
         require(token.transfer(msg.sender, net), "Payout transfer failed");
 
-        _checkDailyCap(msg.sender, _toUsdAmount(net));
         if (roi > 0) _distributeLevelIncome(msg.sender, roi);
 
         emit OrderClaimed(msg.sender, orderId, principal, roi);
@@ -742,35 +749,61 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         lastDaoDistribution = block.timestamp;
     }
 
-    // Spot bonus, checked on every direct join: when the newest direct ($50+) is the upline's
-    // 2nd $50+ join within 24h, pay 5% of both stakes (in USDT). A 3rd+ join in
-    // the same window pays nothing; after a payout nothing counts until 24h have passed and
-    // joins already paid are never reused. Funded by the 5% spot cut taken on withdrawals.
-    function _spotBonusOnJoin(address upline, address joiner) internal {
-        UserInfo storage up = userInfos[upline];
-        if (block.timestamp - up.spotCheckpoint <= 1 days) return;
-        uint256 usd = userInfos[joiner].lastStake;
-        if (usd < SPOTBONUS_MIN_PACKAGE) return;
+    // Spot tier: how many directs ($50+) joined since the last distribution, capped at 2.
+    // directJoinTimes is chronological, so the scan stops at the first older entry (or after 20).
+    function spotTier(address user) public view returns (uint256 count) {
+        UserInfo storage u = userInfos[user];
+        uint256 len = u.directJoinTimes.length;
+        for (uint256 i = len; i > 0 && (len - i) < 20; i--) {
+            if (u.directJoinTimes[i - 1] <= lastSpotBonusDistribution) break;
+            if (userInfos[u.directs[i - 1]].lastStake >= SPOTBONUS_MIN_PACKAGE && ++count == 2) return 2;
+        }
+    }
 
-        uint256 count = 1;
-        uint256 n = up.directs.length;
-        for (uint256 i = n - 1; i > 0; i--) {
-            uint256 t = up.directJoinTimes[i - 1];
-            if (t <= up.spotCheckpoint || block.timestamp - t > 1 days) break;
-            uint256 other = userInfos[up.directs[i - 1]].lastStake;
-            if (other >= SPOTBONUS_MIN_PACKAGE) {
-                usd += other;
-                if (++count > 2) return;
+    // Queues the upline for the next spot distribution on their first $50+ direct of the run,
+    // so nobody has to supply a list. The tier is worked out at distribution time.
+    function _queueSpotQualifier(address upline, address joiner) internal {
+        if (userInfos[joiner].lastStake < SPOTBONUS_MIN_PACKAGE || spotQueuedIn[upline] == spotRunId + 1) return;
+        spotQueuedIn[upline] = spotRunId + 1;
+        spotQueue[spotRunId].push(upline);
+    }
+
+    // Anyone can call once per interval. The pool (5% claim cuts, in USDT) is split 30% / 70%
+    // between users with 1 / 2+ qualifying directs, equally within each group. An empty group's
+    // share, and whatever the caps leave unpaid, stays in the pool.
+    function distributeSpotBonus() external nonReentrant {
+        require(block.timestamp >= lastSpotBonusDistribution + SPOTBONUS_DIST_INTERVAL, "Too soon");
+
+        address[] storage q = spotQueue[spotRunId];
+        uint256[] memory tier = new uint256[](q.length);
+        uint256 n1;
+        uint256 n2;
+        for (uint256 i; i < q.length; i++) {
+            if (!_canEarn(q[i])) continue;
+            uint256 t = spotTier(q[i]);
+            tier[i] = t;
+            if (t == 1) n1++;
+            else if (t == 2) n2++;
+        }
+
+        uint256 pool = dailySpotBonusPool;
+        uint256 share1 = n1 > 0 ? ((pool * SPOT_TIER1_BP) / BP_DENOM) / n1 : 0;
+        uint256 share2 = n2 > 0 ? ((pool * SPOT_TIER2_BP) / BP_DENOM) / n2 : 0;
+        uint256 paid;
+        for (uint256 i; i < q.length; i++) {
+            if (tier[i] == 0) continue;
+            uint256 amt = _clampUsd(q[i], tier[i] == 1 ? share1 : share2);
+            if (amt > 0) {
+                bonusInfos[q[i]].spotBonusGains += amt;
+                paid += amt;
+                emit IncomeCredited(q[i], q[i], amt, 6);
             }
         }
-        if (count != 2 || !_canEarn(upline)) return;
-
-        up.spotCheckpoint = block.timestamp;
-        uint256 amt = _clampUsd(upline, (usd * SPOTBONUS_BP) / BP_DENOM);
-        if (amt > 0) {
-            bonusInfos[upline].spotBonusGains += amt;
-            emit IncomeCredited(joiner, upline, amt, 6);
-        }
+        emit SpotBonusDistributed(pool, n1 + n2);
+        dailySpotBonusPool = pool - paid;
+        delete spotQueue[spotRunId];
+        spotRunId++;
+        lastSpotBonusDistribution = block.timestamp;
     }
 
     // Order details for the UI.
@@ -891,14 +924,15 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     }
 
     // Income claims pay USDT from the token contract: the creator cut and the net amount. The 5%
-    // spot cut is simply not paid out, so it stays in the token contract's USDT balance.
+    // spot cut is not paid out: it stays in the token contract's USDT balance and feeds the spot pool.
     function _claimFromHeld(address user, uint256 amount, uint8 gainType) internal {
         require(amount > 0, "Nothing to claim");
-        require(amount >= MIN_WITHDRAW, "Below minimum withdrawal");
         _checkDailyCap(user, amount);
 
         uint256 creatorCut = (amount * WITHDRAW_CREATOR_BP) / BP_DENOM;
-        uint256 net = amount - creatorCut - (amount * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
+        uint256 spotCut = (amount * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
+        uint256 net = amount - creatorCut - spotCut;
+        dailySpotBonusPool += spotCut;
         token.payUsdt(creatorFeeAddress, creatorCut);
         token.payUsdt(user, net);
         emit Withdrawn(user, amount, net, gainType);
@@ -973,6 +1007,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     // Withdraws from the wallet under the usual rules (minimum, daily cap, creator and spot cuts).
     function withdrawFromWallet(uint256 amount) external nonReentrant {
         require(amount > 0 && amount <= withdrawalWallet[msg.sender], "Insufficient wallet balance");
+        require(amount >= MIN_WITHDRAW, "Below minimum withdrawal");
         withdrawalWallet[msg.sender] -= amount;
         _claimFromHeld(msg.sender, amount, 8);
     }

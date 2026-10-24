@@ -78,13 +78,13 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
 
     uint256 public constant TRANSFER_BURN_BP = 100; // 1%
     uint256 public constant SELL_LP_BP = 750; // 7.5% of a sale stays in this contract (liquidity)
-    uint256 public constant SELL_RESERVE_BP = 750; // 7.5% of a sale goes to the reserve pool
+    uint256 public constant SELL_INSURANCE_BP = 750; // 7.5% of a sale goes to the insurance pool
     uint256 public constant BP_DENOM = 10000;
     uint256 public InitialRate = 1e18;
 
     IUSDLike public usdToken;
     address public stakingContract;
-    address public reservePoolAddress;
+    address public insurancePoolAddress;
 
     // Tracked separately from usdToken.balanceOf(address(this)) so that anyone
     // directly transferring USDT into this contract (a "donation") cannot
@@ -107,17 +107,17 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         address _usdtAddress,
         string memory tokenName,
         string memory tokenSymbol,
-        address _reservePoolAddress,
+        address _insurancePoolAddress,
         address _usdContractCoin
     ) Ownable(_owner) {
         require(_usdtAddress != address(0), "Invalid USDT address");
-        require(_reservePoolAddress != address(0), "Invalid reserve pool address");
+        require(_insurancePoolAddress != address(0), "Invalid insurance pool address");
         require(_usdContractCoin != address(0), "Invalid share contract address");
         usdToken = IUSDLike(_usdtAddress);
         usdToken.approve(_usdContractCoin, type(uint256).max); // ShareAddress pulls USDT from here
         _name = tokenName;
         _symbol = tokenSymbol;
-        reservePoolAddress = _reservePoolAddress;
+        insurancePoolAddress = _insurancePoolAddress;
     }
 
     function name() public view returns (string memory) {
@@ -149,12 +149,14 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         return true;
     }
 
-    function transfer(address recipient, uint256 amount) public returns (bool) {
+    /// @dev Non-transferable by holders; staking may move tokens for protocol payouts.
+    function transfer(address recipient, uint256 amount) public onlyStaking returns (bool) {
         _transferWithBurn(msg.sender, recipient, amount);
         return true;
     }
 
-    function transferFrom(address sender, address recipient, uint256 amount) public returns (bool) {
+    /// @dev Only staking may use allowances, including reserve top-ups.
+    function transferFrom(address sender, address recipient, uint256 amount) public onlyStaking returns (bool) {
         uint256 currentAllowance = _allowances[sender][msg.sender];
         require(currentAllowance >= amount, "NexauraToken: transfer amount exceeds allowance");
         unchecked {
@@ -243,15 +245,15 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         _mint(forAddress, mintedAmount);
     }
 
-    /// @dev reservePoolAddress is expected to be a ReservePool contract that has approved this
-    /// contract as a spender (see ReservePool.approveSpender). When internalReserve alone can't
+    /// @dev insurancePoolAddress is expected to be a InsurancePool contract that has approved this
+    /// contract as a spender (see InsurancePool.approveSpender). When internalReserve alone can't
     /// cover a payout, this pulls the shortfall straight from there via transferFrom instead of
-    /// reverting -- reservePoolAddress is the same insurance/reserve wallet pricedSell already
+    /// reverting -- insurancePoolAddress is the same insurance/reserve wallet pricedSell already
     /// funds with its 10% cut, so it backstops the token contract running short.
     function _coverShortfall(uint256 shortfall, address forAddress) internal {
         require(
-            usdToken.transferFrom(reservePoolAddress, forAddress, shortfall),
-            "Reserve pool pull failed"
+            usdToken.transferFrom(insurancePoolAddress, forAddress, shortfall),
+            "Insurance pool pull failed"
         );
     }
 
@@ -266,19 +268,19 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
     }
 
     /// @dev Public swap. The 15% deduction is taken in TOKENS: 7.5% of `tokenAmount` stays in this
-    /// contract and 7.5% goes to the reserve pool. The remaining 85% is the part actually sold:
+    /// contract and 7.5% goes to the insurance pool. The remaining 85% is the part actually sold:
     /// it is burned and the seller is paid its USD value at the live rate. If internalReserve
-    /// can't cover the payout, the shortfall is pulled from the reserve pool.
+    /// can't cover the payout, the shortfall is pulled from the insurance pool.
     function sell(uint256 tokenAmount) external nonReentrant returns (uint256 netUsd) {
         require(tokenAmount > 0, "Amount must be greater than 0");
 
         uint256 lpTokens = (tokenAmount * SELL_LP_BP) / BP_DENOM;
-        uint256 reserveTokens = (tokenAmount * SELL_RESERVE_BP) / BP_DENOM;
-        uint256 soldTokens = tokenAmount - lpTokens - reserveTokens;
+        uint256 insuranceTokens = (tokenAmount * SELL_INSURANCE_BP) / BP_DENOM;
+        uint256 soldTokens = tokenAmount - lpTokens - insuranceTokens;
         netUsd = (soldTokens * rateInUSDT()) / (10 ** _decimals);
 
         _moveNoBurn(msg.sender, address(this), lpTokens);
-        _moveNoBurn(msg.sender, reservePoolAddress, reserveTokens);
+        _moveNoBurn(msg.sender, insurancePoolAddress, insuranceTokens);
         _burn(msg.sender, soldTokens);
 
         uint256 fromReserve = netUsd > internalReserve ? internalReserve : netUsd;
