@@ -255,14 +255,17 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         userInfos[_owner].lastStake = MAX_PACKAGE;
         userInfos[_owner].daoJoinTime = block.timestamp;
 
-        rankTiers[0] = RankTier(50 * BASE, 3, 2500 * BASE, 400); // Starter
-        rankTiers[1] = RankTier(100 * BASE, 6, 5000 * BASE, 600); // Booster
-        rankTiers[2] = RankTier(200 * BASE, 9, 7500 * BASE, 800); // Builder
-        rankTiers[3] = RankTier(300 * BASE, 12, 10000 * BASE, 1000); // Accelerator
-        rankTiers[4] = RankTier(500 * BASE, 15, 25000 * BASE, 1200); // Multiplier
-        rankTiers[5] = RankTier(700 * BASE, 18, 50000 * BASE, 1400); // Elite
-        rankTiers[6] = RankTier(900 * BASE, 21, 100000 * BASE, 1500); // Legend
-        rankTiers[7] = RankTier(1200 * BASE, 25, 200000 * BASE, 2000); // Legend Prime
+        rankTiers[0] = RankTier(50 * BASE, 3, 2500 * BASE, 400); // Silver
+        rankTiers[1] = RankTier(100 * BASE, 6, 5000 * BASE, 600); // Gold
+        rankTiers[2] = RankTier(200 * BASE, 9, 7500 * BASE, 800); // Pearl
+        rankTiers[3] = RankTier(300 * BASE, 12, 10000 * BASE, 1000); // Platinum
+        rankTiers[4] = RankTier(500 * BASE, 15, 25000 * BASE, 1200); // Sapphire
+        rankTiers[5] = RankTier(700 * BASE, 18, 50000 * BASE, 1400); // Ruby
+        rankTiers[6] = RankTier(900 * BASE, 25, 100000 * BASE, 1600); // Emerald
+        rankTiers[7] = RankTier(1200 * BASE, 30, 250000 * BASE, 1800); // Diamond
+        rankTiers[8] = RankTier(2500 * BASE, 35, 500000 * BASE, 2000); // Black Diamond
+        rankTiers[9] = RankTier(5000 * BASE, 40, 1000000 * BASE, 2500); // Crown Diamond
+        rankTiers[10] = RankTier(10000 * BASE, 60, 2500000 * BASE, 2800); // Kohinoor Diamond
 
         daoTiers[0] = DaoTier(500 * BASE, 1000 * BASE, 1, 10 days);
         daoTiers[1] = DaoTier(1000 * BASE, 2000 * BASE, 2, 20 days);
@@ -368,7 +371,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         UserInfo storage u = userInfos[user];
         (, uint256 strong) = getStrongestLeg(user);
         uint256 others = _legsTotal(user) - strong;
-        for (uint256 t = 8; t > u.rank; t--) {
+        for (uint256 t = 11; t > u.rank; t--) {
             RankTier storage tier = rankTiers[t - 1];
             if (
                 u.lastStake >= tier.selfStake &&
