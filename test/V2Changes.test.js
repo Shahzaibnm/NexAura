@@ -13,9 +13,9 @@ async function deploy() {
   const [owner, creatorFee, treasury, sink] = signers;
   const u = signers.slice(4);
   const usdt = await (await ethers.getContractFactory("MockUSDT")).deploy();
-  const reserve = await (await ethers.getContractFactory("ReservePool")).deploy(owner.address);
+  const reserve = await (await ethers.getContractFactory("InsurancePool")).deploy(owner.address);
   const token = await (await ethers.getContractFactory("NexauraTokenV2")).deploy(
-    owner.address, await usdt.getAddress(), "Nexaura", "NXA", treasury.address, await reserve.getAddress()
+    owner.address, await usdt.getAddress(), "Nexaura", "NXA", await reserve.getAddress(), treasury.address
   );
   const staking = await (await ethers.getContractFactory("NexauraStakingV2")).deploy(
     owner.address, await usdt.getAddress(), creatorFee.address
@@ -89,8 +89,7 @@ describe("V2 changes", function () {
     await join(staking, b, a, 1000); // direct income would be $50 -> cut to $20
     expect(await staking.capOf(a.address)).to.equal(e(20)); // price moved, cap did not
     expect(await staking.capUsedUsd(a.address)).to.equal(e(20));
-    const worth = await usdOf(token, (await info(staking, a)).referralGains);
-    expect(worth).to.be.closeTo(e(20), e("0.000001"));
+    expect((await info(staking, a)).referralGains).to.equal(e(20)); // direct income is credited in USD
 
     await join(staking, c, a, 1000); // 2 directs -> 3x = $30, only $10 more room
     expect(await staking.capOf(a.address)).to.equal(e(30));
@@ -103,31 +102,37 @@ describe("V2 changes", function () {
     expect(await staking.capUsedUsd(a.address)).to.equal(e(30));
   });
 
-  it("income withdrawal: no mint, 5% creator + 5% spot pool kept, 90% to user", async function () {
-    const { owner, creatorFee, u, token, staking } = await deploy();
+  it("income withdrawal: USDT paid from the token contract, 5% creator + 5% to the spot pool, 90% to user", async function () {
+    const { owner, creatorFee, u, usdt, token, staking } = await deploy();
     const [a, b] = u;
     await join(staking, a, owner, 100);
     await join(staking, b, a, 300); // direct income $15
     const amount = await staking.claimableReferralGains(a.address);
-    expect(await usdOf(token, amount)).to.be.closeTo(e(15), e("0.000001"));
-    const creator = (amount * 500n) / 10000n;
+    expect(amount).to.equal(e(15));
+    const tokenUsdt = await usdt.balanceOf(await token.getAddress());
+    const reserve = await token.internalReserve();
     const supply = await token.totalSupply();
-    const feeBefore = await token.balanceOf(creatorFee.address);
+    const feeBefore = await usdt.balanceOf(creatorFee.address);
+    const userBefore = await usdt.balanceOf(a.address);
     const poolBefore = await staking.dailySpotBonusPool();
 
     await staking.connect(a).claimReferralGains();
 
-    expect(await token.balanceOf(a.address)).to.equal(amount - 2n * creator);
-    expect(await token.balanceOf(creatorFee.address) - feeBefore).to.equal(creator);
-    expect(await staking.dailySpotBonusPool() - poolBefore).to.equal(creator);
+    expect((await usdt.balanceOf(a.address)) - userBefore).to.equal(e("13.5"));
+    expect((await usdt.balanceOf(creatorFee.address)) - feeBefore).to.equal(e("0.75"));
+    expect((await staking.dailySpotBonusPool()) - poolBefore).to.equal(e("0.75"));
+    expect(tokenUsdt - (await usdt.balanceOf(await token.getAddress()))).to.equal(e("14.25")); // creator + net leave
+    expect(await token.internalReserve()).to.equal(reserve); // reserve untouched
     expect(await token.totalSupply()).to.equal(supply);
+    expect((await info(staking, a)).referralClaimed).to.equal(e(15));
   });
 
-  it("reserve top-up: staking short of tokens pulls the shortfall from the reserve pool, no burn", async function () {
-    const { owner, sink, u, token, staking, reserve } = await deploy();
-    const [a, b] = u;
+  it("reserve top-up: order claim with staking short of tokens pulls the shortfall from the insurance pool, no burn", async function () {
+    const { owner, creatorFee, sink, u, token, staking, reserve } = await deploy();
+    const [a] = u;
     await join(staking, a, owner, 100);
-    await join(staking, b, a, 300);
+    await pass(10 * MIN + 30);
+    await staking.connect(a).makeStake(e(100)); // recycle
     const sAddr = await staking.getAddress();
     await ethers.provider.send("hardhat_impersonateAccount", [sAddr]);
     await ethers.provider.send("hardhat_setBalance", [sAddr, "0x56BC75E2D63100000"]);
@@ -137,22 +142,24 @@ describe("V2 changes", function () {
     await token.connect(s).transfer(sink.address, bal - e(100)); // drain staking to 0
     expect(await token.balanceOf(sAddr)).to.equal(0n);
 
-    const amount = await staking.claimableReferralGains(a.address);
-    const need = amount - 2n * ((amount * 500n) / 10000n) + (amount * 500n) / 10000n; // net + creator
-    // allowance too small -> reverts
+    const rate = await token.rateInUSDT();
+    const principal = (e(100) * e(1)) / rate;
+    const roi = (principal * 1250n) / 10000n;
+    const cut = (roi * 500n) / 10000n;
+    const need = principal + roi - cut; // net + creator cut
     await reserve.approveSpender(sAddr, need - 1n);
-    await expect(staking.connect(a).claimReferralGains()).to.be.revertedWith(
+    await expect(staking.connect(a).claimOrder(1)).to.be.revertedWith(
       "NexauraToken: transfer amount exceeds allowance"
     );
     await reserve.approveSpender(sAddr, need);
     const poolBefore = await token.balanceOf(await reserve.getAddress());
-    await staking.connect(a).claimReferralGains();
+    await staking.connect(a).claimOrder(1);
     expect(poolBefore - (await token.balanceOf(await reserve.getAddress()))).to.equal(need); // exact, no burn
-    expect(await token.balanceOf(a.address)).to.equal(amount - 2n * ((amount * 500n) / 10000n));
+    expect(await token.balanceOf(a.address)).to.equal(principal + roi - 2n * cut);
   });
 
   it("level income: first upline gets 5% of the claimer's ROI, second 3%", async function () {
-    const { owner, u, staking } = await deploy();
+    const { owner, u, token, staking } = await deploy();
     const [a, b, c] = u;
     await join(staking, a, owner, 100);
     await join(staking, b, a, 100);
@@ -162,8 +169,9 @@ describe("V2 changes", function () {
     await staking.connect(c).claimOrder(3);
     const roi = (await info(staking, c)).roiGains;
     expect(roi).to.be.gt(0n);
-    expect((await info(staking, b)).levelGains).to.equal((roi * 500n) / 10000n); // level 1 = 5%
-    expect((await info(staking, a)).levelGains).to.equal((roi * 300n) / 10000n); // level 2 = 3%
+    const roiUsd = await usdOf(token, roi); // level income is credited in USD
+    expect((await info(staking, b)).levelGains).to.equal((roiUsd * 500n) / 10000n); // level 1 = 5%
+    expect((await info(staking, a)).levelGains).to.equal((roiUsd * 300n) / 10000n); // level 2 = 3%
   });
 
   describe("rank (Starter: $50 self, 3 directs, $2,500 match = $1,250 strong + $1,250 other)", function () {
@@ -199,25 +207,29 @@ describe("V2 changes", function () {
     });
 
     it("daily reward = 1.25% x 2,500 x 4% = $1.25/day, claimable via claimTeamGrowthGains", async function () {
-      const { a, token, staking } = await tree(1000, 300, 700, 700);
+      const { a, usdt, staking } = await tree(1000, 300, 700, 700);
       await pass(9 * MIN + 20); // 9 rank-days
+      const before = await usdt.balanceOf(a.address);
       await staking.connect(a).claimTeamGrowthGains();
       const claimed = (await info(staking, a)).teamGrowthClaimed;
-      expect(await usdOf(token, claimed)).to.be.closeTo(e("11.25"), e("0.001"));
+      expect(claimed).to.equal(e("11.25")); // credited and claimed in USD
+      expect((await usdt.balanceOf(a.address)) - before).to.equal(e("10.125")); // 90% in USDT
     });
 
-    it("small amount is blocked by the $10 minimum withdrawal", async function () {
-      const { a, staking } = await tree(1000, 300, 700, 700);
+    it("allows rank income claims below $10", async function () {
+      const { a, usdt, staking } = await tree(1000, 300, 700, 700);
       await pass(3 * MIN + 20); // ~$3.75
-      await expect(staking.connect(a).claimTeamGrowthGains()).to.be.revertedWith("Below minimum withdrawal");
+      const before = await usdt.balanceOf(a.address);
+      await staking.connect(a).claimTeamGrowthGains();
+      expect((await usdt.balanceOf(a.address)) - before).to.equal(e("3.375"));
     });
 
     it("stops 17 days after the newest order (16 whole days = $20)", async function () {
-      const { a, token, staking } = await tree(1000, 300, 700, 700);
+      const { a, staking } = await tree(1000, 300, 700, 700);
       await pass(40 * MIN);
       await staking.connect(a).claimTeamGrowthGains();
       const claimed = (await info(staking, a)).teamGrowthClaimed;
-      expect(await usdOf(token, claimed)).to.be.closeTo(e(20), e("0.001"));
+      expect(claimed).to.equal(e(20));
       await pass(10 * MIN); // still nothing new
       await expect(staking.connect(a).claimTeamGrowthGains()).to.be.revertedWith("Nothing to claim");
     });

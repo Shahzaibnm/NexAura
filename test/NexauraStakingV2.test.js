@@ -16,10 +16,7 @@ async function deploy() {
   const u = signers.slice(3);
 
   const usdt = await (await ethers.getContractFactory("MockUSDT")).deploy();
-  const reserve = await (await ethers.getContractFactory("ReservePool")).deploy(
-    owner.address,
-    await usdt.getAddress()
-  );
+  const reserve = await (await ethers.getContractFactory("InsurancePool")).deploy(owner.address);
   const token = await (await ethers.getContractFactory("NexauraTokenV2")).deploy(
     owner.address,
     await usdt.getAddress(),
@@ -389,7 +386,7 @@ describe("NexauraStakingV2 — full behaviour", function () {
   });
 
   describe("token contract", function () {
-    it("sell takes the 15% in tokens (5% stays in the token, 10% to the reserve pool) and burns + pays USDT for the other 85%", async function () {
+    it("sell takes the 15% in tokens (5% stays in the token, 10% to the insurance pool) and burns + pays USDT for the other 85%", async function () {
       const { owner, u, usdt, reserve, token, staking } = await deploy();
       const [alice] = u;
       await join(staking, alice, owner, 100);
@@ -399,8 +396,8 @@ describe("NexauraStakingV2 — full behaviour", function () {
       const bal = await token.balanceOf(alice.address);
       const rate = await token.rateInUSDT();
       const lpTokens = (bal * 500n) / 10000n;
-      const reserveTokens = (bal * 1000n) / 10000n;
-      const sold = bal - lpTokens - reserveTokens;
+      const insuranceTokens = (bal * 1000n) / 10000n;
+      const sold = bal - lpTokens - insuranceTokens;
       const usdOut = (sold * rate) / e(1);
 
       const supplyBefore = await token.totalSupply();
@@ -414,23 +411,33 @@ describe("NexauraStakingV2 — full behaviour", function () {
 
       expect(await token.balanceOf(alice.address)).to.equal(0n);
       expect((await token.balanceOf(await token.getAddress())) - tokenSelfBefore).to.equal(lpTokens);
-      expect((await token.balanceOf(await reserve.getAddress())) - poolTokensBefore).to.equal(reserveTokens);
+      expect((await token.balanceOf(await reserve.getAddress())) - poolTokensBefore).to.equal(insuranceTokens);
       expect(await token.totalSupply()).to.equal(supplyBefore - sold); // only the sold part is burned
       expect((await usdt.balanceOf(alice.address)) - usdtBefore).to.equal(usdOut);
       expect(await usdt.balanceOf(await reserve.getAddress())).to.equal(poolUsdtBefore); // no USDT to the pool
       expect(await token.internalReserve()).to.equal(internalBefore - usdOut);
     });
 
-    it("normal user-to-user transfers still burn 1%", async function () {
+    it("blocks holder transfers and approved spender transfers", async function () {
       const { owner, u, token, staking } = await deploy();
       const [alice, bob] = u;
       await join(staking, alice, owner, 100);
       await pass(10 * DAY + 60);
+      await staking.connect(alice).makeStake(e(100));
       await staking.connect(alice).claimOrder(1);
       const supplyBefore = await token.totalSupply();
-      await token.connect(alice).transfer(bob.address, e(10));
-      expect(await token.balanceOf(bob.address)).to.equal(e("9.9"));
-      expect(await token.totalSupply()).to.equal(supplyBefore - e("0.1"));
+      const balanceBefore = await token.balanceOf(alice.address);
+      await expect(token.connect(alice).transfer(bob.address, e(10)))
+        .to.be.revertedWith("Only staking contract");
+      await expect(token.connect(alice).transfer(await staking.getAddress(), e(10)))
+        .to.be.revertedWith("Only staking contract");
+      await token.connect(alice).approve(bob.address, e(10));
+      await expect(token.connect(bob).transferFrom(alice.address, bob.address, e(10)))
+        .to.be.revertedWith("Only staking contract");
+      expect(await token.allowance(alice.address, bob.address)).to.equal(e(10));
+      expect(await token.balanceOf(alice.address)).to.equal(balanceBefore);
+      expect(await token.balanceOf(bob.address)).to.equal(0n);
+      expect(await token.totalSupply()).to.equal(supplyBefore);
     });
 
     it("only the staking contract can mint, buy or credit the reserve", async function () {

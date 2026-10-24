@@ -13,10 +13,7 @@ async function deploy() {
   const [owner, creatorFee, treasury, alice, bob, carol, dave] = await ethers.getSigners();
 
   const usdt = await (await ethers.getContractFactory("MockUSDT")).deploy();
-  const reserve = await (await ethers.getContractFactory("ReservePool")).deploy(
-    owner.address,
-    await usdt.getAddress()
-  );
+  const reserve = await (await ethers.getContractFactory("InsurancePool")).deploy(owner.address);
   const token = await (await ethers.getContractFactory("NexauraTokenV2")).deploy(
     owner.address,
     await usdt.getAddress(),

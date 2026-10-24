@@ -32,7 +32,7 @@ async function main() {
     "Nexaura",
     "NXA",
     deployer.address, // liquidityPoolAddress
-    deployer.address // reservePoolAddress
+    deployer.address // insurancePoolAddress
   );
   await token.waitForDeployment();
   const tokenAddress = await token.getAddress();

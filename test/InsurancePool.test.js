@@ -7,13 +7,13 @@ async function deployFixture() {
   const MockUSDT = await ethers.getContractFactory("MockUSDT");
   const usdt = await MockUSDT.deploy();
 
-  const ReservePool = await ethers.getContractFactory("ReservePool");
-  const reserve = await ReservePool.deploy(owner.address, await usdt.getAddress());
+  const InsurancePool = await ethers.getContractFactory("InsurancePool");
+  const reserve = await InsurancePool.deploy(owner.address, await usdt.getAddress());
 
   return { owner, spender, alice, usdt, reserve };
 }
 
-describe("ReservePool", function () {
+describe("InsurancePool", function () {
   it("sets the owner and USDT address at construction", async function () {
     const { owner, usdt, reserve } = await deployFixture();
     expect(await reserve.owner()).to.equal(owner.address);
