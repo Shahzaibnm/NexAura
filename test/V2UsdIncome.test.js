@@ -38,6 +38,34 @@ const join = async (staking, user, ref, amt) => {
 const info = (staking, a) => staking.bonusInfos(a.address);
 
 describe("V2 USD incomes", function () {
+  for (const lowRate of [false, true]) {
+    it(`limits gross sales to $5,000 at a rate ${lowRate ? "below" : "above"} $1`, async function () {
+      const { owner, u, usdt, token } = await deploy();
+      const [a] = u;
+      await token.setStakingContract(owner.address);
+      await usdt.mint(await token.getAddress(), e(10000));
+      await token.pricedBuy(e(10000), a.address);
+      if (lowRate) {
+        await token.mintTo(a.address, e(10000)); // $0.50 per token
+      } else {
+        await usdt.mint(await token.getAddress(), e(10000));
+        await token.creditReserve(e(10000)); // $2 per token
+      }
+      expect(await token.MAX_SELL_USD()).to.equal(e(5000));
+      const rate = await token.rateInUSDT();
+      const maxTokens = e(5000) * e(1) / rate;
+      expect(maxTokens).to.equal(e(lowRate ? 10000 : 2500));
+      const before = await token.balanceOf(a.address);
+      await expect(token.connect(a).sell(maxTokens + 1n))
+        .to.be.revertedWith("Exceeds maximum sell value");
+      expect(await token.balanceOf(a.address)).to.equal(before);
+      const usdBefore = await usdt.balanceOf(a.address);
+      await token.connect(a).sell(maxTokens);
+      expect(await token.balanceOf(a.address)).to.equal(before - maxTokens);
+      expect(await usdt.balanceOf(a.address) - usdBefore).to.equal(e(4250));
+    });
+  }
+
   it("claims order principal and ROI above the daily limit without consuming it", async function () {
     const { owner, u, usdt, token, staking } = await deploy();
     const [a] = u;
@@ -90,14 +118,18 @@ describe("V2 USD incomes", function () {
     await expect(staking.connect(a).withdrawFromWallet(1)).to.be.revertedWith("Insufficient wallet balance");
   });
 
-  it("pays individual referral income below $10", async function () {
+  it("credits referral income below $10 without transferring funds", async function () {
     const { owner, u, usdt, staking } = await deploy();
     const [a, b] = u;
     await join(staking, a, owner, 200);
     await join(staking, b, a, 100);
     const before = await usdt.balanceOf(a.address);
     await staking.connect(a).claimReferralGains();
-    expect((await usdt.balanceOf(a.address)) - before).to.equal(e("4.5"));
+    expect((await usdt.balanceOf(a.address)) - before).to.equal(0n);
+    expect(await staking.withdrawalWallet(a.address)).to.equal(e(5));
+    expect(await staking.withdrawnToday(a.address)).to.equal(0n);
+    expect(await staking.dailySpotBonusPool()).to.equal(0n);
+    await expect(staking.connect(a).claimReferralGains()).to.be.revertedWith("Nothing to claim");
     expect(await staking.claimableReferralGains(a.address)).to.equal(0n);
   });
 
@@ -147,6 +179,7 @@ describe("V2 USD incomes", function () {
 
     const before = await usdt.balanceOf(a.address);
     await staking.connect(a).claimDaoGains();
+    await staking.connect(a).withdrawFromWallet(await staking.withdrawalWallet(a.address));
     expect((await usdt.balanceOf(a.address)) - before).to.equal(e("31.5")); // 90% of 35
   });
 
@@ -165,6 +198,7 @@ describe("V2 USD incomes", function () {
 
     const before = await usdt.balanceOf(a.address);
     await staking.connect(a).claimCtoGains();
+    await staking.connect(a).withdrawFromWallet(await staking.withdrawalWallet(a.address));
     expect((await usdt.balanceOf(a.address)) - before).to.equal(e(108));
   });
 
@@ -175,7 +209,8 @@ describe("V2 USD incomes", function () {
       const [f, g, p1, h1, p2, h2, h3, low, lowDirect] = x.u;
       await join(x.staking, f, x.owner, 100);
       await join(x.staking, g, f, 1000); // f direct income $50
-      await x.staking.connect(f).claimReferralGains(); // 5% spot cut = $2.50 -> pool
+      await x.staking.connect(f).claimReferralGains();
+      await x.staking.connect(f).withdrawFromWallet(await x.staking.withdrawalWallet(f.address)); // 5% spot cut = $2.50 -> pool
       await join(x.staking, p1, x.owner, 100);
       await join(x.staking, h1, p1, 50);
       await join(x.staking, p2, x.owner, 100);
@@ -214,7 +249,8 @@ describe("V2 USD incomes", function () {
       const { staking, owner } = x;
       await join(staking, f, owner, 100);
       await join(staking, g, f, 1000);
-      await staking.connect(f).claimReferralGains(); // pool $2.50, f is tier 1 (g)
+      await staking.connect(f).claimReferralGains();
+      await staking.connect(f).withdrawFromWallet(await staking.withdrawalWallet(f.address)); // pool $2.50, f is tier 1 (g)
       await join(staking, p1, owner, 100);
       await join(staking, h1, p1, 50); // p1 tier 1 too -> nobody in tier 2
       const pool = await staking.dailySpotBonusPool();

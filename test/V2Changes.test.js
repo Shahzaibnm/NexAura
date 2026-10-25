@@ -117,6 +117,7 @@ describe("V2 changes", function () {
     const poolBefore = await staking.dailySpotBonusPool();
 
     await staking.connect(a).claimReferralGains();
+    await staking.connect(a).withdrawFromWallet(await staking.withdrawalWallet(a.address));
 
     expect((await usdt.balanceOf(a.address)) - userBefore).to.equal(e("13.5"));
     expect((await usdt.balanceOf(creatorFee.address)) - feeBefore).to.equal(e("0.75"));
@@ -174,7 +175,35 @@ describe("V2 changes", function () {
     expect((await info(staking, a)).levelGains).to.equal((roiUsd * 300n) / 10000n); // level 2 = 3%
   });
 
-  describe("rank (Starter: $50 self, 3 directs, $2,500 match = $1,250 strong + $1,250 other)", function () {
+  it("configures all 11 ranks with the supplied requirements and incentives", async function () {
+    const { staking } = await deploy();
+    const tiers = [
+      [50, 3, 2500, 400, "1.25"],
+      [100, 6, 5000, 600, "3.75"],
+      [200, 9, 7500, 800, "7.5"],
+      [300, 12, 10000, 1000, "12.5"],
+      [500, 15, 25000, 1200, "37.5"],
+      [700, 18, 50000, 1400, "87.5"],
+      [900, 25, 100000, 1600, "200"],
+      [1200, 30, 250000, 1800, "562.5"],
+      [2500, 35, 500000, 2000, "1250"],
+      [5000, 40, 1000000, 2500, "3125"],
+      [10000, 60, 2500000, 2800, "8750"],
+    ];
+    for (let i = 0; i < tiers.length; i++) {
+      const [self, directs, business, incentive, daily] = tiers[i];
+      const tier = await staking.rankTiers(i);
+      expect(tier.selfStake).to.equal(e(self));
+      expect(tier.directsCount).to.equal(BigInt(directs));
+      expect(tier.teamBusiness).to.equal(e(business));
+      expect(tier.incentiveBp).to.equal(BigInt(incentive));
+      const dailyUsd = tier.teamBusiness * (await staking.RANK_DAILY_BP()) / 10000n
+        * tier.incentiveBp / 10000n;
+      expect(dailyUsd).to.equal(e(daily));
+    }
+  });
+
+  describe("rank (Silver: $50 self, 3 directs, $2,500 match = $1,250 strong + $1,250 other)", function () {
     async function tree(strongStake, strongChild, d2, d3) {
       const x = await deploy();
       const [a, d1, d1c, e2, e3] = x.u;
@@ -213,7 +242,8 @@ describe("V2 changes", function () {
       await staking.connect(a).claimTeamGrowthGains();
       const claimed = (await info(staking, a)).teamGrowthClaimed;
       expect(claimed).to.equal(e("11.25")); // credited and claimed in USD
-      expect((await usdt.balanceOf(a.address)) - before).to.equal(e("10.125")); // 90% in USDT
+      expect((await usdt.balanceOf(a.address)) - before).to.equal(0n);
+      expect(await staking.withdrawalWallet(a.address)).to.equal(e("11.25"));
     });
 
     it("allows rank income claims below $10", async function () {
@@ -221,7 +251,8 @@ describe("V2 changes", function () {
       await pass(3 * MIN + 20); // ~$3.75
       const before = await usdt.balanceOf(a.address);
       await staking.connect(a).claimTeamGrowthGains();
-      expect((await usdt.balanceOf(a.address)) - before).to.equal(e("3.375"));
+      expect((await usdt.balanceOf(a.address)) - before).to.equal(0n);
+      expect(await staking.withdrawalWallet(a.address)).to.equal(e("3.75"));
     });
 
     it("stops 17 days after the newest order (16 whole days = $20)", async function () {

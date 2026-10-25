@@ -77,7 +77,7 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
     string private _symbol;
 
     uint256 public constant TRANSFER_BURN_BP = 100; // 1%
-    uint256 public constant MAX_SELL_AMOUNT = 5000 * 10 ** 18; // Per transaction, before deductions.
+    uint256 public constant MAX_SELL_USD = 5000 * 10 ** 18; // Gross USD value per transaction, before deductions.
     uint256 public constant SELL_LP_BP = 750; // 7.5% of a sale stays in this contract (liquidity)
     uint256 public constant SELL_INSURANCE_BP = 750; // 7.5% of a sale goes to the insurance pool
     uint256 public constant BP_DENOM = 10000;
@@ -274,12 +274,13 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
     /// can't cover the payout, the shortfall is pulled from the insurance pool.
     function sell(uint256 tokenAmount) external nonReentrant returns (uint256 netUsd) {
         require(tokenAmount > 0, "Amount must be greater than 0");
-        require(tokenAmount <= MAX_SELL_AMOUNT, "Exceeds maximum sell amount");
+        uint256 rate = rateInUSDT();
+        require(tokenAmount * rate <= MAX_SELL_USD * (10 ** _decimals), "Exceeds maximum sell value");
 
         uint256 lpTokens = (tokenAmount * SELL_LP_BP) / BP_DENOM;
         uint256 insuranceTokens = (tokenAmount * SELL_INSURANCE_BP) / BP_DENOM;
         uint256 soldTokens = tokenAmount - lpTokens - insuranceTokens;
-        netUsd = (soldTokens * rateInUSDT()) / (10 ** _decimals);
+        netUsd = (soldTokens * rate) / (10 ** _decimals);
 
         _moveNoBurn(msg.sender, address(this), lpTokens);
         _moveNoBurn(msg.sender, insurancePoolAddress, insuranceTokens);
