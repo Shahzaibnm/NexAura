@@ -926,10 +926,17 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         return _claimableOfType(u, b.daoGains, b.daoClaimed);
     }
 
-    // Income claims pay USDT from the token contract: the creator cut and the net amount. The 5%
-    // spot cut is not paid out: it stays in the token contract's USDT balance and feeds the spot pool.
+    event IncomeMovedToWallet(address indexed user, uint256 amount, uint8 gainType);
+
+    // Credit gross USDT value without transferring funds or charging withdrawal fees.
     function _claimFromHeld(address user, uint256 amount, uint8 gainType) internal {
         require(amount > 0, "Nothing to claim");
+        withdrawalWallet[user] += amount;
+        emit IncomeMovedToWallet(user, amount, gainType);
+    }
+
+    // Only actual wallet payouts consume the daily limit and charge fees.
+    function _payFromWallet(address user, uint256 amount) internal {
         _checkDailyCap(user, amount);
 
         uint256 creatorCut = (amount * WITHDRAW_CREATOR_BP) / BP_DENOM;
@@ -938,7 +945,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         dailySpotBonusPool += spotCut;
         token.payUsdt(creatorFeeAddress, creatorCut);
         token.payUsdt(user, net);
-        emit Withdrawn(user, amount, net, gainType);
+        emit Withdrawn(user, amount, net, 8);
     }
 
     function claimReferralGains() external nonReentrant {
@@ -1003,8 +1010,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         t = _min(b.daoGains - b.daoClaimed, room);
         b.daoClaimed += t; total += t;
 
-        require(total > 0, "Nothing to claim");
-        withdrawalWallet[user] += total;
+        _claimFromHeld(user, total, 8);
     }
 
     // Withdraws from the wallet under the usual rules (minimum, daily cap, creator and spot cuts).
@@ -1012,7 +1018,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         require(amount > 0 && amount <= withdrawalWallet[msg.sender], "Insufficient wallet balance");
         require(amount >= MIN_WITHDRAW, "Below minimum withdrawal");
         withdrawalWallet[msg.sender] -= amount;
-        _claimFromHeld(msg.sender, amount, 8);
+        _payFromWallet(msg.sender, amount);
     }
 
     function _min(uint256 a, uint256 b) private pure returns (uint256) {
