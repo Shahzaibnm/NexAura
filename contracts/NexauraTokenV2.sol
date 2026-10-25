@@ -78,8 +78,8 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
 
     uint256 public constant TRANSFER_BURN_BP = 100; // 1%
     uint256 public constant MAX_SELL_USD = 5000 * 10 ** 18; // Gross USD value per transaction, before deductions.
-    uint256 public constant SELL_LP_BP = 750; // 7.5% of a sale stays in this contract (liquidity)
-    uint256 public constant SELL_INSURANCE_BP = 750; // 7.5% of a sale goes to the insurance pool
+    uint256 public constant SELL_LP_BP = 1000; // 10% of a sale stays in this contract (liquidity)
+    uint256 public constant SELL_INSURANCE_BP = 500; // 5% of a sale goes to the insurance pool
     uint256 public constant BP_DENOM = 10000;
     uint256 public InitialRate = 1e18;
 
