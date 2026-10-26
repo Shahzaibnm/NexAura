@@ -6,9 +6,7 @@ interface INexauraToken {
     function rateInUSDT() external view returns (uint256);
     function insurancePoolAddress() external view returns (address);
     function pricedBuy(uint256 usdAmount, address forAddress) external returns (uint256);
-    function mintTo(address to, uint256 amount) external;
     function creditReserve(uint256 usdAmount) external;
-    function payUsdt(address to, uint256 amount) external;
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 }
@@ -503,16 +501,14 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
         {
         uint256 creatorCut = (usdAmount * CREATOR_FEE_BP) / BP_DENOM;
-        // DAO and reserve cuts apply to new money only; the locked share stays on the full package.
-        uint256 daoCut = (newDeposit * DAO_FEE_BP) / BP_DENOM;
+        uint256 daoCut = (usdAmount * DAO_FEE_BP) / BP_DENOM; // full package, recycles included
         uint256 mintUsd = (usdAmount * (BP_DENOM - CREATOR_FEE_BP - DAO_FEE_BP - LIQUIDITY_FEE_BP)) /
             BP_DENOM;
-        uint256 reserveUsd = usdAmount - creatorCut - daoCut - mintUsd; // 9% of new money + the unallocated rest
+        uint256 reserveUsd = usdAmount - creatorCut - daoCut - mintUsd; // the 9% reserve share
 
         require(usdToken.transfer(creatorFeeAddress, creatorCut), "Creator USDT transfer failed");
         DAO_Amount += daoCut;
-        // 81% of the package backs locked user tokens; the rest of the non-admin, non-DAO money
-        // (the 9% cut on new money plus whatever recycles don't allocate) increases the reserve
+        // 81% of the package backs locked user tokens; the remaining 9% increases the reserve
         // without minting. The DAO's cut stays here as USDT until an eligible distribution.
         require(
             usdToken.transfer(address(token), mintUsd + reserveUsd),
@@ -943,8 +939,12 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 spotCut = (amount * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
         uint256 net = amount - creatorCut - spotCut;
         dailySpotBonusPool += spotCut;
-        token.payUsdt(creatorFeeAddress, creatorCut);
-        token.payUsdt(user, net);
+        // Paid in tokens at the live rate, from this contract's balance (same as claimOrder).
+        uint256 creatorTokens = _toTokenAmount(creatorCut);
+        uint256 netTokens = _toTokenAmount(net);
+        _ensureTokens(creatorTokens + netTokens);
+        require(token.transfer(creatorFeeAddress, creatorTokens), "Creator transfer failed");
+        require(token.transfer(user, netTokens), "Payout transfer failed");
         emit Withdrawn(user, amount, net, 8);
     }
 

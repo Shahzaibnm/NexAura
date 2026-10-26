@@ -78,8 +78,9 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
 
     uint256 public constant TRANSFER_BURN_BP = 100; // 1%
     uint256 public constant MAX_SELL_USD = 5000 * 10 ** 18; // Gross USD value per transaction, before deductions.
-    uint256 public constant SELL_LP_BP = 1000; // 10% of a sale stays in this contract (liquidity)
+    uint256 public constant SELL_LP_BP = 500; // 5% of a sale stays in this contract (liquidity)
     uint256 public constant SELL_INSURANCE_BP = 500; // 5% of a sale goes to the insurance pool
+    uint256 public constant SELL_BURN_BP = 500; // 5% of a sale is burned with no payout
     uint256 public constant BP_DENOM = 10000;
     uint256 public InitialRate = 1e18;
 
@@ -268,9 +269,10 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
         emit Transfer(sender, recipient, amount);
     }
 
-    /// @dev Public swap. The 15% deduction is taken in TOKENS: 7.5% of `tokenAmount` stays in this
-    /// contract and 7.5% goes to the insurance pool. The remaining 85% is the part actually sold:
-    /// it is burned and the seller is paid its USD value at the live rate. If internalReserve
+    /// @dev Public swap. The 15% deduction is taken in TOKENS: 5% of `tokenAmount` stays in this
+    /// contract, 5% goes to the insurance pool and 5% is burned with no payout. The remaining 85%
+    /// is the part actually sold: it is burned and the seller is paid its USD value at the live
+    /// rate (90% of the tokens are burned in total). If internalReserve
     /// can't cover the payout, the shortfall is pulled from the insurance pool.
     function sell(uint256 tokenAmount) external nonReentrant returns (uint256 netUsd) {
         require(tokenAmount > 0, "Amount must be greater than 0");
@@ -279,12 +281,13 @@ contract NexauraTokenV2 is Ownable, ReentrancyGuard {
 
         uint256 lpTokens = (tokenAmount * SELL_LP_BP) / BP_DENOM;
         uint256 insuranceTokens = (tokenAmount * SELL_INSURANCE_BP) / BP_DENOM;
-        uint256 soldTokens = tokenAmount - lpTokens - insuranceTokens;
+        uint256 penaltyBurn = (tokenAmount * SELL_BURN_BP) / BP_DENOM;
+        uint256 soldTokens = tokenAmount - lpTokens - insuranceTokens - penaltyBurn;
         netUsd = (soldTokens * rate) / (10 ** _decimals);
 
         _moveNoBurn(msg.sender, address(this), lpTokens);
         _moveNoBurn(msg.sender, insurancePoolAddress, insuranceTokens);
-        _burn(msg.sender, soldTokens);
+        _burn(msg.sender, soldTokens + penaltyBurn);
 
         uint256 fromReserve = netUsd > internalReserve ? internalReserve : netUsd;
         uint256 shortfall = netUsd - fromReserve;
