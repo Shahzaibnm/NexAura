@@ -168,7 +168,7 @@ describe("V2 USD incomes", function () {
     const reserve = await token.internalReserve();
     const supply = await token.totalSupply();
 
-    await staking.distributeDAO();
+    await staking.connect(b).distributeDAO(); // anyone can call
 
     expect((await info(staking, a)).daoGains).to.equal(pool);
     expect(await staking.DAO_Amount()).to.equal(0n);
@@ -183,16 +183,18 @@ describe("V2 USD incomes", function () {
     expect((await usdt.balanceOf(a.address)) - before).to.equal(e("31.5")); // 90% of 35
   });
 
-  it("CTO: pool = tier % of month volume in USD, duplicates paid once, claimable in USDT", async function () {
+  it("CTO: public, built-in list, pool = tier % of period volume in USD, claimable in USDT", async function () {
     const { owner, u, usdt, staking } = await deploy();
     const [a, b] = u;
     await join(staking, a, owner, 1000);
     await join(staking, b, a, 5000); // a: $5000 direct business -> CTO tier 1 (2%)
     expect(await staking.monthVolumeUsd()).to.equal(e(6000));
-    await pass(30 * MIN + 1);
+    await pass(15 * MIN + 1);
     await staking.connect(a).makeStake(e(1000)); // recycle: keeps a inside the 17-day income window
-    await staking.distributeCTO([a.address, a.address, b.address]);
-    expect((await info(staking, a)).ctoGains).to.equal(e(120)); // 2% of 6000, paid once
+    expect(await staking.isCtoQualified(a.address)).to.equal(true);
+    expect(await staking.isCtoQualified(b.address)).to.equal(false);
+    await staking.connect(b).distributeCTO(); // anyone can call
+    expect((await info(staking, a)).ctoGains).to.equal(e(120)); // 2% of 6000
     expect((await info(staking, b)).ctoGains).to.equal(0n);
     expect(await staking.monthVolumeUsd()).to.equal(0n);
 

@@ -118,7 +118,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     uint256 public constant SPOT_TIER1_BP = 3000; // 30% of the pool: users with 1 qualifying direct
     uint256 public constant SPOT_TIER2_BP = 7000; // 70% of the pool: users with 2+ qualifying directs
     uint256 public constant DAO_DIST_INTERVAL = 7 minutes;
-    uint256 public constant CTO_DIST_INTERVAL = 30 minutes;
+    uint256 public constant CTO_DIST_INTERVAL = 15 minutes; // 15 "days" in this contract's 1 day = 1 minute test scale
 
     uint256 public constant MIN_WITHDRAW = 10 * BASE;
     uint256 public constant MAX_DAILY_WITHDRAW = 3000 * BASE;
@@ -128,7 +128,6 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     uint256 public DAO_Amount; // USDT held here for DAO distribution (5% of each stake)
     uint256 public allStake;
     uint256 public monthVolumeUsd; // stake volume since the last CTO run
-    uint256 public ctoRunId;
     uint256 public dailySpotBonusPool; // USDT value, fed by the 5% claim cut
     uint256 public lastSpotBonusDistribution;
     uint256 public spotRunId;
@@ -142,7 +141,8 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     mapping(address => uint256) public withdrawnToday;
     mapping(address => uint256) public withdrawalWallet; // USDT moved here by claimAll, paid out by withdrawFromWallet
     mapping(address => bool) public doubleFirstStake; // migrated user whose first stake still counts double
-    mapping(address => uint256) public lastCtoRun; // dedupe guard for candidate lists
+    address[] public ctoQualifiedUsers;
+    mapping(address => bool) public isCtoQualified;
 
     struct UserInfo {
         address referral;
@@ -258,12 +258,12 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         rankTiers[2] = RankTier(200 * BASE, 9, 7500 * BASE, 800); // Pearl
         rankTiers[3] = RankTier(300 * BASE, 12, 10000 * BASE, 1000); // Platinum
         rankTiers[4] = RankTier(500 * BASE, 15, 25000 * BASE, 1200); // Sapphire
-        rankTiers[5] = RankTier(700 * BASE, 18, 50000 * BASE, 1400); // Ruby
-        rankTiers[6] = RankTier(900 * BASE, 25, 100000 * BASE, 1600); // Emerald
-        rankTiers[7] = RankTier(1200 * BASE, 30, 250000 * BASE, 1800); // Diamond
-        rankTiers[8] = RankTier(2500 * BASE, 35, 500000 * BASE, 2000); // Black Diamond
-        rankTiers[9] = RankTier(5000 * BASE, 40, 1000000 * BASE, 2500); // Crown Diamond
-        rankTiers[10] = RankTier(10000 * BASE, 60, 2500000 * BASE, 2800); // Kohinoor Diamond
+        rankTiers[5] = RankTier(700 * BASE, 16, 50000 * BASE, 1400); // Ruby
+        rankTiers[6] = RankTier(900 * BASE, 18, 100000 * BASE, 1600); // Emerald
+        rankTiers[7] = RankTier(1200 * BASE, 20, 250000 * BASE, 1800); // Diamond
+        rankTiers[8] = RankTier(2500 * BASE, 22, 500000 * BASE, 2000); // Black Diamond
+        rankTiers[9] = RankTier(5000 * BASE, 25, 1000000 * BASE, 2500); // Crown Diamond
+        rankTiers[10] = RankTier(10000 * BASE, 30, 2500000 * BASE, 2800); // Kohinoor Diamond
 
         daoTiers[0] = DaoTier(500 * BASE, 1000 * BASE, 1, 10 days);
         daoTiers[1] = DaoTier(1000 * BASE, 2000 * BASE, 2, 20 days);
@@ -328,6 +328,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             }
             _updateRank(current);
             _updateDaoShare(current);
+            _registerCto(current);
             depth++;
             current = userInfos[current].referral;
         }
@@ -673,22 +674,28 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         return 0;
     }
 
-    // ponytail: owner supplies the candidate list (no on-chain registry of all users);
-    // add an indexer-fed list or pagination if the qualified set grows large.
-    // Each tier's pool (tier % of the month's stake volume) is split equally among that tier's
-    // qualified users; a user only collects their highest tier. Duplicates are paid once.
-    function distributeCTO(address[] calldata candidates) external onlyOwner nonReentrant {
-        require(block.timestamp >= lastCtoDistribution + CTO_DIST_INTERVAL, "Too soon");
-        ctoRunId++;
+    // Users join the CTO list the first time they reach tier 1 (business only grows, so a tier is
+    // never lost). The tier itself is re-read at distribution time.
+    function _registerCto(address user) internal {
+        if (!isCtoQualified[user] && _ctoTierOf(user) > 0) {
+            isCtoQualified[user] = true;
+            ctoQualifiedUsers.push(user);
+        }
+    }
 
-        uint8[] memory tierOf = new uint8[](candidates.length);
+    // ponytail: iterates every CTO-qualified user; paginate if that set grows large.
+    // Anyone can call once per interval. Each tier's pool (tier % of the period's stake volume)
+    // is split equally among that tier's qualified users; a user only collects their highest tier.
+    function distributeCTO() external nonReentrant {
+        require(block.timestamp >= lastCtoDistribution + CTO_DIST_INTERVAL, "Too soon");
+
+        address[] storage list = ctoQualifiedUsers;
+        uint8[] memory tierOf = new uint8[](list.length);
         uint256[3] memory counts;
-        for (uint256 i; i < candidates.length; i++) {
-            address c = candidates[i];
-            if (lastCtoRun[c] == ctoRunId || !_canEarn(c)) continue;
-            uint8 t = _ctoTierOf(c);
+        for (uint256 i; i < list.length; i++) {
+            if (!_canEarn(list[i])) continue;
+            uint8 t = _ctoTierOf(list[i]);
             if (t == 0) continue;
-            lastCtoRun[c] = ctoRunId;
             tierOf[i] = t;
             counts[t - 1]++;
         }
@@ -699,12 +706,12 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
                 perUser[t] = ((monthVolumeUsd * ctoTiers[t].bonusBp) / BP_DENOM) / counts[t];
             }
         }
-        for (uint256 i; i < candidates.length; i++) {
+        for (uint256 i; i < list.length; i++) {
             if (tierOf[i] == 0) continue;
-            uint256 amt = _clampUsd(candidates[i], perUser[tierOf[i] - 1]);
+            uint256 amt = _clampUsd(list[i], perUser[tierOf[i] - 1]);
             if (amt > 0) {
-                bonusInfos[candidates[i]].ctoGains += amt;
-                emit IncomeCredited(candidates[i], candidates[i], amt, 5);
+                bonusInfos[list[i]].ctoGains += amt;
+                emit IncomeCredited(list[i], list[i], amt, 5);
             }
         }
 
@@ -716,7 +723,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
     // ponytail: iterates every DAO-qualified user; paginate if that set grows large.
     // The pool is USDT, credited straight to users' gains. The paid USDT moves to the token
     // contract (which pays claims) without touching its reserve. Unallocated USDT carries over.
-    function distributeDAO() external onlyOwner nonReentrant {
+    function distributeDAO() external nonReentrant {
         require(block.timestamp >= lastDaoDistribution + DAO_DIST_INTERVAL, "Too soon");
 
         uint256 totalShares;
