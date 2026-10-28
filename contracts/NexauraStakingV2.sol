@@ -396,14 +396,15 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
             stakeInfos[orders[orders.length - 1]].startTime + MATURITY_PERIOD + GRACE_PERIOD;
     }
 
-    // Cap (USD) is always based on the user's last stake.
+    // Income cap (USD): the principal counts toward the 2x / 3x multiple, so the income room is
+    // (multiple - 1) x the stored package. A migrated user's doubled first package gets the same rule.
     function _capOf(address user) internal view returns (uint256) {
         uint256[] storage orders = userInfos[user].stakeOrders;
         if (orders.length == 0) return 0;
         uint256 mult = userInfos[user].directs.length >= MIN_DIRECTS_FOR_WORKING
             ? WORKING_CAP_MULT
             : NONWORKING_CAP_MULT;
-        return stakeInfos[orders[orders.length - 1]].usdAmount * mult;
+        return stakeInfos[orders[orders.length - 1]].usdAmount * (mult - 1);
     }
 
     function _totalGains(address user) internal view returns (uint256) {
