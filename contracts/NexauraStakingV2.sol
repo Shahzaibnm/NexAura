@@ -139,6 +139,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
     mapping(address => uint256) public lastWithdrawDay;
     mapping(address => uint256) public withdrawnToday;
+    mapping(address => uint256) public totalPaidUsd; // USD of rewards actually paid out (net of fees): ROI from order claims + wallet withdrawals; never the principal
     mapping(address => uint256) public withdrawalWallet; // USDT moved here by claimAll, paid out by withdrawFromWallet
     mapping(address => bool) public doubleFirstStake; // migrated user whose first stake still counts double
     address[] public ctoQualifiedUsers;
@@ -463,16 +464,11 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         return (usdAmount * BASE) / token.rateInUSDT();
     }
 
-    // If this contract holds fewer tokens than a payout needs, pull the shortfall from the
-    // insurance pool (the owner must have approved this contract as a spender there). Transfers
-    // into this contract are burn-exempt in the token, so the full shortfall arrives.
-    function _ensureTokens(uint256 needed) internal {
-        uint256 bal = token.balanceOf(address(this));
-        if (bal >= needed) return;
-        require(
-            token.transferFrom(token.insurancePoolAddress(), address(this), needed - bal),
-            "Reserve top-up failed"
-        );
+    // USD of insurance room left for a user: lastStake - rewards already paid, never negative.
+    function _insuredRoomUsd(address user) internal view returns (uint256) {
+        uint256 last = userInfos[user].lastStake;
+        uint256 paid = totalPaidUsd[user];
+        return last > paid ? last - paid : 0;
     }
 
     function _toUsdAmount(uint256 tokenAmount) internal view returns (uint256) {
@@ -653,9 +649,23 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 spotCut = (roi * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
         uint256 net = principal + roi - creatorCut - spotCut;
         dailySpotBonusPool += _toUsdAmount(spotCut);
-        _ensureTokens(creatorCut + net);
+        uint256 amount = creatorCut + net;
+        if (token.balanceOf(address(this)) < amount) {
+            // Staking contract is short: the insurance pool pays instead (it must have approved this
+            // contract as a spender), but only while the user's rewards paid are below his last stake
+            // (room = lastStake - totalPaidUsd). Otherwise the claim reverts and the order is untouched.
+            require(
+                _toTokenAmount(_insuredRoomUsd(msg.sender)) >= amount,
+                "Not covered by insurance"
+            );
+            require(
+                token.transferFrom(token.insurancePoolAddress(), address(this), amount),
+                "Reserve top-up failed"
+            );
+        }
         require(token.transfer(creatorFeeAddress, creatorCut), "Creator transfer failed");
         require(token.transfer(msg.sender, net), "Payout transfer failed");
+        totalPaidUsd[msg.sender] += _toUsdAmount(roi - creatorCut - spotCut); // reward part only
 
         if (roi > 0) _distributeLevelIncome(msg.sender, roi);
 
@@ -939,21 +949,37 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         emit IncomeMovedToWallet(user, amount, gainType);
     }
 
-    // Only actual wallet payouts consume the daily limit and charge fees.
-    function _payFromWallet(address user, uint256 amount) internal {
+    // Only actual wallet payouts consume the daily limit and charge fees. Returns the USD amount
+    // actually paid: less than requested when the staking contract is short and the insurance
+    // room (lastStake - totalPaidUsd) is smaller. The caller keeps the difference in the wallet.
+    function _payFromWallet(address user, uint256 amount) internal returns (uint256) {
+        bool insured = token.balanceOf(address(this)) <
+            _toTokenAmount(amount - (amount * WITHDRAW_SPOTBONUS_BP) / BP_DENOM);
+        if (insured) {
+            uint256 room = _insuredRoomUsd(user);
+            require(room > 0, "Not covered by insurance");
+            if (amount > room) amount = room;
+        }
         _checkDailyCap(user, amount);
 
         uint256 creatorCut = (amount * WITHDRAW_CREATOR_BP) / BP_DENOM;
         uint256 spotCut = (amount * WITHDRAW_SPOTBONUS_BP) / BP_DENOM;
         uint256 net = amount - creatorCut - spotCut;
         dailySpotBonusPool += spotCut;
-        // Paid in tokens at the live rate, from this contract's balance (same as claimOrder).
+        // Paid in tokens at the live rate (same as claimOrder).
         uint256 creatorTokens = _toTokenAmount(creatorCut);
         uint256 netTokens = _toTokenAmount(net);
-        _ensureTokens(creatorTokens + netTokens);
+        if (insured) {
+            require(
+                token.transferFrom(token.insurancePoolAddress(), address(this), creatorTokens + netTokens),
+                "Reserve top-up failed"
+            );
+        }
         require(token.transfer(creatorFeeAddress, creatorTokens), "Creator transfer failed");
         require(token.transfer(user, netTokens), "Payout transfer failed");
+        totalPaidUsd[user] += net;
         emit Withdrawn(user, amount, net, 8);
+        return amount;
     }
 
     function claimReferralGains() external nonReentrant {
@@ -1026,7 +1052,8 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         require(amount > 0 && amount <= withdrawalWallet[msg.sender], "Insufficient wallet balance");
         require(amount >= MIN_WITHDRAW, "Below minimum withdrawal");
         withdrawalWallet[msg.sender] -= amount;
-        _payFromWallet(msg.sender, amount);
+        uint256 paid = _payFromWallet(msg.sender, amount);
+        if (paid < amount) withdrawalWallet[msg.sender] += amount - paid; // unpaid part stays in the wallet
     }
 
     function _min(uint256 a, uint256 b) private pure returns (uint256) {

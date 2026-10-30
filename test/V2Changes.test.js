@@ -81,35 +81,25 @@ describe("V2 changes", function () {
     console.log("      live rate:", ethers.formatEther(rate), "principal tokens:", ethers.formatEther(principal));
   });
 
-  it("cap is USD and includes the principal: $10 package -> $10 income room (2x), $20 with 2+ directs (3x)", async function () {
-    const { owner, u, staking } = await deploy();
+  it("cap is USD: 2x with <2 directs, 3x with 2+, income cut to the USD room, independent of price", async function () {
+    const { owner, u, token, staking } = await deploy();
     const [a, b, c, d] = u;
-    await join(staking, a, owner, 10); // 2x of $10 = $20 total, $10 of it is the principal
-    expect(await staking.capOf(a.address)).to.equal(e(10));
-    await join(staking, b, a, 1000); // direct income would be $50 -> cut to the $10 room
-    expect(await staking.capOf(a.address)).to.equal(e(10));
-    expect(await staking.capUsedUsd(a.address)).to.equal(e(10));
-    expect((await info(staking, a)).referralGains).to.equal(e(10));
-
-    await join(staking, c, a, 1000); // 2 directs -> 3x = $30 total, $20 income room, $10 more
+    await join(staking, a, owner, 10); // 1 direct later -> 2x = $20
     expect(await staking.capOf(a.address)).to.equal(e(20));
+    await join(staking, b, a, 1000); // direct income would be $50 -> cut to $20
+    expect(await staking.capOf(a.address)).to.equal(e(20)); // price moved, cap did not
     expect(await staking.capUsedUsd(a.address)).to.equal(e(20));
+    expect((await info(staking, a)).referralGains).to.equal(e(20)); // direct income is credited in USD
+
+    await join(staking, c, a, 1000); // 2 directs -> 3x = $30, only $10 more room
+    expect(await staking.capOf(a.address)).to.equal(e(30));
+    expect(await staking.capUsedUsd(a.address)).to.equal(e(30));
 
     const before = await info(staking, a);
     await join(staking, d, a, 1000); // cap full: nothing more
-    expect((await info(staking, a)).referralGains).to.equal(before.referralGains);
-    expect(await staking.capUsedUsd(a.address)).to.equal(e(20));
-  });
-
-  it("cap for a migrated user: doubled package, same rule ((multiple - 1) x the stored doubled package)", async function () {
-    const { owner, u, staking } = await deploy();
-    const [m, b] = u;
-    await staking.migrateUsers([m.address], [owner.address]);
-    await staking.connect(m).makeStake(e(100)); // package $200, paid $100
-    expect(await staking.capOf(m.address)).to.equal(e(200)); // (2 - 1) x 200
-    await join(staking, b, m, 100);
-    await join(staking, u[2], m, 100); // 2 directs -> 3 x 200 - 100
-    expect(await staking.capOf(m.address)).to.equal(e(400)); // (3 - 1) x 200
+    const after = await info(staking, a);
+    expect(after.referralGains).to.equal(before.referralGains);
+    expect(await staking.capUsedUsd(a.address)).to.equal(e(30));
   });
 
   it("income withdrawal: USDT paid from the token contract, 5% creator + 5% to the spot pool, 90% to user", async function () {
