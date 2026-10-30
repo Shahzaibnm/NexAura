@@ -405,7 +405,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 mult = userInfos[user].directs.length >= MIN_DIRECTS_FOR_WORKING
             ? WORKING_CAP_MULT
             : NONWORKING_CAP_MULT;
-        return stakeInfos[orders[orders.length - 1]].usdAmount * (mult - 1);
+        return stakeInfos[orders[orders.length - 1]].usdAmount * (mult);
     }
 
     function _totalGains(address user) internal view returns (uint256) {
