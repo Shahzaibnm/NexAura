@@ -632,7 +632,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256[] storage orders = userInfos[msg.sender].stakeOrders;
         require(orders[orders.length - 1] > orderId, "Recycle required: buy next package first");
 
-        uint256 principal = _toTokenAmount(o.paidUsd); // only what was really paid comes back
+        uint256 principal = _toTokenAmount(o.usdAmount); // only what was really paid comes back
         uint256 roi = _clampToCapRoom(
             msg.sender,
             (_toTokenAmount(o.usdAmount) * ROI_BP) / BP_DENOM // ROI on the package size (doubled when migrated)
