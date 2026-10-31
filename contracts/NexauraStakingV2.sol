@@ -166,7 +166,6 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 usdAmount; // package size used for cap and ROI (doubled on a migrated user's first stake)
         uint256 startTime;
         bool claimed;
-        uint256 paidUsd; // what the user actually paid; the principal returned on claim
     }
 
     struct RankTier {
@@ -405,7 +404,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256 mult = userInfos[user].directs.length >= MIN_DIRECTS_FOR_WORKING
             ? WORKING_CAP_MULT
             : NONWORKING_CAP_MULT;
-        return stakeInfos[orders[orders.length - 1]].usdAmount * (mult - 1);
+        return stakeInfos[orders[orders.length - 1]].usdAmount * (mult);
     }
 
     function _totalGains(address user) internal view returns (uint256) {
@@ -518,7 +517,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
 
         _settleRankIncome(msg.sender); // days earned under the previous order, before it is replaced
         allStake++;
-        stakeInfos[allStake] = Order(msg.sender, pkg, block.timestamp, false, usdAmount);
+        stakeInfos[allStake] = Order(msg.sender, pkg, block.timestamp, false);
         u.stakeOrders.push(allStake);
         u.lastStake = pkg;
         u.selfBusiness += newDeposit;
@@ -632,7 +631,7 @@ contract NexauraStakingV2 is Ownable, ReentrancyGuard {
         uint256[] storage orders = userInfos[msg.sender].stakeOrders;
         require(orders[orders.length - 1] > orderId, "Recycle required: buy next package first");
 
-        uint256 principal = _toTokenAmount(o.paidUsd); // only what was really paid comes back
+        uint256 principal = _toTokenAmount(o.usdAmount); // the full stored package comes back (doubled for a migrated first stake), paid from the contract balance, nothing minted
         uint256 roi = _clampToCapRoom(
             msg.sender,
             (_toTokenAmount(o.usdAmount) * ROI_BP) / BP_DENOM // ROI on the package size (doubled when migrated)
